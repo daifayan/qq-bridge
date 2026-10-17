@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: syntax + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Syntax-check every source file. `node --check` only parses, so it
+      # needs no dependencies and cannot be affected by network flakiness.
+      - name: Syntax check
+        shell: bash
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            if node --check "$f" 2>/dev/null; then
+              :
+            else
+              echo "::error file=$f::syntax error"
+              fail=1
+            fi
+          done < <(find src scripts -type f \( -name '*.js' -o -name '*.mjs' \) | sort)
+          exit $fail
+
+      # Pure-function regression tests only: no SnowLuma / DSH / QQ needed.
+      # Integration tests require a live DSH + OneBot environment and are
+      # therefore not run here.
+      - name: Unit tests (pure)
+        run: npm run test-md
