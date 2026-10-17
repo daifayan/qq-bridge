@@ -1,0 +1,69 @@
+# Dependencies
+node_modules/
+.npm-cache/
+
+# Runtime state and local config (never publish)
+state/
+config.json
+*.log
+*.bak
+*.bak-*
+
+# Local development / planning / research docs (not part of public project)
+/PROJECT_GUIDE.md
+/ARCH_REVIEW.md
+/DSH_QQ_TOOLS_PLAN.md
+/GEN2_SIMULATION_PLAN.md
+/SOCIAL_MODE_PLAN.md
+/RESEARCH_QQ_MESSAGE_DND.md
+/RESEARCH_SNOWLUMA_EMOJI_STICKER.md
+/SnowLuma功能调研.md
+/真人语感策略.md
+# 花费实测档案：含个人用量数据，且未被任何公开文档引用 —— 默认不发布。
+# （如需公开，删掉这一行并挪到 docs/ 后从 README 链接，避免成为孤儿文件。）
+/TOKEN_COST.md
+
+# 本地模型选型 / 硬件配置调研（内部笔记，无任何公开文档引用）
+/LOCAL_MODEL_SIZING.md
+
+# 大体积演示视频（10.93 MB）：改由 Release 附件托管，README 有链接。
+# 注意：移除只影响此后提交、--depth 1 克隆与 Release 的 Source zip；
+# 历史中的旧 blob 仍在，完整 clone 的体积要等历史重写后才会下降。
+/assets/project-intro.mp4
+
+# Local one-off dev/debug/patch scripts
+# (machine-specific paths/IDs, or bound to artifacts of a single probe run under state/)
+/scripts/cleanup-probe-sessions.mjs
+/scripts/cleanup-probe-workspaces.mjs
+/scripts/cleanup-test-sessions.mjs
+/scripts/debug-whitelist.mjs
+/scripts/diag-archive.mjs
+/scripts/fix-probe-workspace-title.mjs
+/scripts/patch-qq-chat-v2-collect-memory.mjs
+/scripts/patch-qq-chat-v2-presleep.mjs
+/scripts/patch-qq-chat-v2-stickers.mjs
+/scripts/patch-web-mcp-timeout.mjs
+
+# ── 2026-10-17 开源前补充：本地/敏感/内部，绝不公开 ──────────────────
+# 内部交接文档：含真实 accessToken、机器人 QQ 号、本机绝对路径
+/交接说明.md
+/2026-09-30-工作总结.md
+/AstrBot-能力对比.md
+# 配置备份：含真实 accessToken / consoleToken
+/config.before-toggle.json
+# 一键启动器：内嵌真实 BOTUIN + OneBot accessToken，
+# 可公开的脱敏模板见 启动全家桶.bat.example
+/启动全家桶.bat
+# 路径真源（本机绝对路径 + 用户名）；开源模板见 paths.bat.example
+/paths.bat
+# 启动 DSH 的 Windows 快捷方式（二进制 .lnk，目标指向本机路径）
+/dsh-launcher.lnk
+# 一次性脚本：paths 自检 / IDM 卸载残留清理（与本项目无关）
+/_test-paths.bat
+/cleanup-idm.ps1
+# 角色卡与 agent 预设：个人创作内容（persona 提示词），默认不发布。
+# 想连人设一起开源就删掉这三行——preset-bundle 是功能+人设混合体，
+# dsh/agent-presets 是它的旧目录式版本，roles/ 是纯角色卡。
+/roles/
+/preset-bundle/
+/dsh/agent-presets/

@@ -1,0 +1,32 @@
+@echo off
+REM ============================================================
+REM  Path configuration - the ONLY place to edit when moving this
+REM  project to another machine, drive letter or directory.
+REM
+REM  Setup: copy this file to `paths.bat` and fill in your values:
+REM      copy paths.bat.example paths.bat
+REM
+REM  Every launcher (.bat) calls this file; every .mjs reads it too
+REM  (scripts/paths.mjs parses the `set "KEY=VALUE"` lines below).
+REM
+REM  Keep this file PURE ASCII: cmd.exe parses .bat byte-wise and a
+REM  non-ASCII byte here corrupts the lines that follow it.
+REM
+REM  NODE      node.exe (>=22.13). Leave EMPTY to use `node` on PATH.
+REM  DSHBIN    optional: absolute path to DSH's lib/bin.js. Leave EMPTY
+REM            for auto-detection (scripts/dsh-modules.mjs probes the
+REM            $DSH_HOME profiles directory).
+REM  DSHLNK    shortcut (.lnk) or .bat that starts DeepSeek Harness
+REM  DSHOPEN   optional script that opens the DSH page with a fresh token
+REM  SNOWDIR   SnowLuma directory (it ships its own node.exe)
+REM  BRIDGEDIR this project's directory
+REM  LOGDIR    where bridge/DSH logs are written
+REM ============================================================
+
+set "NODE="
+set "DSHBIN="
+set "DSHLNK="
+set "DSHOPEN="
+set "SNOWDIR="
+set "BRIDGEDIR="
+set "LOGDIR="

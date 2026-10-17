@@ -1,0 +1,182 @@
+@echo off
+setlocal enabledelayedexpansion
+title DeepSeek Suite - One-Click Start
+
+rem ============================================================
+rem  DeepSeek Suite one-click start (PUBLIC TEMPLATE)
+rem    DSH(3080) + SnowLuma(5099/3000/3001) + QQ-Bridge(3100)
+rem
+rem  This is the sanitized template of 启动全家桶.bat. The real file
+rem  is git-ignored because it embeds the bot's QQ number and OneBot
+rem  accessToken. To use this template:
+rem    1. copy it to 启动全家桶.bat
+rem    2. copy paths.bat.example to paths.bat and fill your paths
+rem    3. set BOTUIN / BOTTOKEN below (values from your config.json:
+rem       the bot QQ number and snowluma.accessToken)
+rem    4. set VERIFY_BOT_IDENTITY=1
+rem
+rem  This file must stay PURE ASCII: cmd reads .bat byte-wise and a
+rem  non-ASCII path here corrupts the rest of the script.
+rem
+rem  Run this by double-clicking. Services started from an agent
+rem  session die when that session ends - this one does not.
+rem ============================================================
+
+rem ---- paths: single source of truth is paths.bat ----
+set "HERE=%~dp0"
+if exist "%HERE%paths.bat" call "%HERE%paths.bat"
+
+rem Resolve node: configured path first, then PATH. If neither works the
+rem launcher stops with an explicit error (no hidden machine fallbacks).
+set "NODE_EXE="
+if defined NODE if exist "%NODE%" set "NODE_EXE=%NODE%"
+if not defined NODE_EXE (
+  where node >nul 2>&1
+  if not errorlevel 1 set "NODE_EXE=node"
+)
+
+rem Fallbacks in case paths.bat is missing entirely
+if not defined DSHLNK set "DSHLNK=%HERE%dsh-launcher.lnk"
+if not defined SNOWDIR set "SNOWDIR=%HERE%..\SnowLuma"
+if not defined BRIDGEDIR set "BRIDGEDIR=%HERE%"
+if not defined LOGDIR set "LOGDIR=%HERE%..\bridge-logs"
+
+rem ---- bot identity check (fill these in, see header) ----
+rem Must stay identical to config.json: uin + snowluma.accessToken.
+set "BOTUIN="
+set "BOTTOKEN="
+set "VERIFY_BOT_IDENTITY=0"
+
+echo ============================================================
+echo    DeepSeek Suite  -  One-Click Start
+echo    DSH(3080) + SnowLuma(5099/3000/3001) + QQ-Bridge(3100)
+echo ============================================================
+echo.
+echo    QQ must be running and logged in: SnowLuma attaches to QQ.
+echo.
+
+rem ---- 1) DSH -------------------------------------------------------
+netstat -ano | findstr ":3080 " | findstr "LISTENING" >nul 2>&1
+if !errorlevel!==0 (
+  echo [1/3] DSH Web     : already running on 3080 - skipped
+) else (
+  echo [1/3] DSH Web     : starting... a console window will stay open
+  if exist "%DSHLNK%" (
+    start "DeepSeek Harness" "%DSHLNK%"
+  ) else (
+    echo       [ERROR] DSH launcher missing: %DSHLNK%
+    echo       Create a shortcut whose target runs: node start-dsh.mjs
+    echo       and point DSHLNK in paths.bat at it - or start DSH
+    echo       manually with: node start-dsh.mjs
+  )
+)
+
+rem ---- 2) SnowLuma --------------------------------------------------
+netstat -ano | findstr ":5099 " | findstr "LISTENING" >nul 2>&1
+if !errorlevel!==0 (
+  echo [2/3] SnowLuma    : already running on 5099 - skipped
+) else (
+  echo [2/3] SnowLuma    : starting...
+  rem Do NOT start SnowLuma's launcher.bat directly. launcher.bat uses
+  rem RELATIVE paths and a bare `node`; cmd resolves a bare `node` via
+  rem the current directory first, so it only works when the cwd is
+  rem already SNOWDIR (where SnowLuma ships its own node.exe).
+  rem `start` inherits THIS script's cwd, so the bare node is not found,
+  rem errorlevel 1 fires and the window just sits at `pause` - SnowLuma
+  rem silently never starts. The wrapper pins the cwd and calls an
+  rem absolute node.exe, so the launcher cwd stops mattering.
+  if exist "%BRIDGEDIR%\start-snowluma.bat" (
+    start "SnowLuma" /min "%BRIDGEDIR%\start-snowluma.bat"
+  ) else (
+    rem fallback: launcher.bat resolves relative paths against the cwd,
+    rem so the cwd must be SNOWDIR before starting it.
+    echo       [warn] wrapper missing, falling back to launcher.bat
+    pushd "%SNOWDIR%"
+    start "SnowLuma" /min "launcher.bat"
+    popd
+  )
+)
+
+rem ---- wait for the OneBot adapters AND verify it really is the bot ----
+rem Checking "something answers on 3000" is NOT enough. SnowLuma hands EVERY
+rem hooked QQ account the same default ports, so another logged-in QQ account
+rem can take 3000/3001 first and the bot account gets none at all.
+echo.
+echo       waiting for the OneBot HTTP API on 3000 ...
+set "ONEBOT=0"
+if "!VERIFY_BOT_IDENTITY!"=="1" if defined BOTUIN if defined BOTTOKEN (
+  for /l %%i in (1,1,30) do (
+    if !ONEBOT!==0 (
+      curl.exe -s -m 3 -X POST -H "content-type: application/json" -H "Authorization: Bearer !BOTTOKEN!" -d "{}" http://127.0.0.1:3000/get_login_info > "%TEMP%\suite-onebot-check.json" 2>nul
+      findstr /c:"!BOTUIN!" "%TEMP%\suite-onebot-check.json" >nul 2>&1
+      if !errorlevel!==0 (
+        set "ONEBOT=1"
+      ) else (
+        rem ping instead of timeout: timeout needs a real console stdin
+        ping -n 3 127.0.0.1 >nul 2>&1
+      )
+    )
+  )
+  if !ONEBOT!==1 (
+    echo       OneBot is UP and verified as the bot account !BOTUIN!
+  ) else (
+    echo       *** OneBot did NOT answer as the bot account !BOTUIN! after ~60s.
+    echo           Something may be listening on 3000, but it is not the bot.
+    echo           Most likely: ANOTHER QQ account logged into this PC took ports
+    echo           3000/3001 - SnowLuma gives every hooked account those same
+    echo           defaults and the first one to start wins.
+    echo           Fix: stop SnowLuma, then empty the extra account config
+    echo           %SNOWDIR%\config\onebot_^<QQ number^>.json
+    echo           (set its httpServers and wsServers to empty arrays),
+    echo           then run this launcher again.
+    echo           Also make sure QQ is logged in as the bot !BOTUIN!.
+    echo           Other possibility: BOTTOKEN no longer matches config.json,
+    echo           value snowluma.accessToken.
+  )
+) else (
+  echo       [skip] bot identity not verified - set BOTUIN/BOTTOKEN and
+  echo              VERIFY_BOT_IDENTITY=1 to enable the check.
+)
+
+rem ---- 3) QQ-Bridge ------------------------------------------------
+netstat -ano | findstr ":3100 " | findstr "LISTENING" >nul 2>&1
+if !errorlevel!==0 (
+  echo [3/3] QQ-Bridge   : already running on 3100 - skipped
+) else (
+  echo [3/3] QQ-Bridge   : starting... daemon, auto-restarts on crash
+  if not exist "%LOGDIR%" mkdir "%LOGDIR%"
+  if exist "%BRIDGEDIR%\start.bat" (
+    start "qq-bridge" /min "%BRIDGEDIR%\start.bat"
+  ) else (
+    rem fallback: start the bridge directly with the resolved node path
+    if defined NODE_EXE if exist "!NODE_EXE!" (
+      start "qq-bridge" /min "!NODE_EXE!" "%BRIDGEDIR%\src\bridge.js"
+    ) else (
+      echo       [ERROR] node.exe not found: !NODE_EXE!
+      echo               set NODE= in paths.bat, or install node on PATH
+    )
+  )
+)
+
+echo.
+echo ============================================================
+echo    Done. Opening the web UIs...
+echo ============================================================
+timeout /t 6 /nobreak >nul
+rem Open the DSH page WITH its fresh token: the token is regenerated on every
+rem start and otherwise only appears in the "DeepSeek Harness" console window.
+if defined DSHOPEN if exist "%DSHOPEN%" (
+  "%NODE_EXE%" "%DSHOPEN%"
+) else (
+  start "" "http://127.0.0.1:3080/"
+)
+start "" "http://127.0.0.1:3100/"
+
+echo.
+echo    DSH GUI            http://127.0.0.1:3080/
+echo    QQ-Bridge console  http://127.0.0.1:3100/
+echo    SnowLuma WebUI     http://127.0.0.1:5099/
+echo.
+echo    You can close THIS window; the services keep running.
+echo.
+pause

@@ -1,0 +1,10 @@
+把想让它发出去的图片放进这个目录（outbox），然后在 QQ 里对它说：
+「把 outbox 里的 xxx.png 发出来」——它会用 qq_send_image(source="file", path="outbox/xxx.png") 发。
+
+规则（桥接层硬校验，改不了）：
+  * 只允许 assets/ 目录（含本目录）里的图片；
+  * 只允许 png / jpg / jpeg / gif / webp / bmp；
+  * 单张不超过 8 MB（改 config.json 的 socialV2.images.maxBytes）；
+  * 图片消息不能附带文字：想说话让它先单独发一条文字，再发图。
+
+它自己的形象图是：assets/deepseek娘.png（用 qq_send_image(source="self") 直接发，不用放这里）。
