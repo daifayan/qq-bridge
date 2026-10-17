@@ -1,5 +1,7 @@
 # QQ ↔ DeepSeek Harness 桥接
 
+[![CI](https://github.com/daifayan/qq-bridge/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/daifayan/qq-bridge/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Node](https://img.shields.io/badge/node-%3E%3D22.13-brightgreen.svg)](package.json)
+
 **English**: [README.en.md](README.en.md) | **中文**: [README.md](README.md)
 
 > 📘 详细内外核说明书见 **[docs/PROJECT_GUIDE.md](docs/PROJECT_GUIDE.md)**（架构、数据流、配置全解、调试与改进指南）。
