@@ -61,9 +61,11 @@ config.json
 # 一次性脚本：paths 自检 / IDM 卸载残留清理（与本项目无关）
 /_test-paths.bat
 /cleanup-idm.ps1
-# 角色卡与 agent 预设：个人创作内容（persona 提示词），默认不发布。
-# 想连人设一起开源就删掉这三行——preset-bundle 是功能+人设混合体，
-# dsh/agent-presets 是它的旧目录式版本，roles/ 是纯角色卡。
+# 角色卡与 agent 预设
+# roles/ 是纯角色卡（个人创作），默认不发布。
+# preset-bundle/ 是旧版功能+人设混合体，setup-dsh.mjs 不依赖它，默认不发布。
+# dsh/agent-presets/ 里 qq-chat 与 qq-chat-v2 是 setup-dsh.mjs 必需的功能预设，
+# 已开源（不含人设，人设由 state/current-role.json 注入）；reviewer 是本地个人预设，保持不发布。
 /roles/
 /preset-bundle/
-/dsh/agent-presets/
+/dsh/agent-presets/reviewer/
