@@ -148,6 +148,21 @@ npm run test-slang
 npm run test-stickers
 ```
 
-## Compliance
+## Compliance & Risk Notice
 
-SnowLuma is an independent third-party project and is not affiliated with Tencent/QQ. This project is for learning and technical research only; please follow the relevant terms and the QQ User Agreement.
+**Account risk (please read)**
+
+- SnowLuma is an independent third-party project, not affiliated with Tencent/QQ. It connects to QQ through an **unofficial protocol** and is **not authorized by Tencent**.
+- Unofficial clients carry a risk of **risk-control flags, login restrictions, or account bans**. This project accepts no responsibility for that. **Do not use it on an account you cannot afford to lose.**
+- "Simulated group friend" features (proactively starting topics, timed lurking/waking, sticker collection) resemble patterns that QQ risk control watches closely, so the risk is higher; disable them unless you need them.
+- Read SnowLuma's EULA and the QQ User Agreement before use, and comply with your local laws. This project is for learning and technical research only.
+
+**Data & privacy**
+
+- Group/private chat text is sent to the configured model service (DeepSeek by default) to generate replies.
+- Some data is **stored locally**: session mapping (`state/sessions.json`), slang-learning evidence, activity logs.
+- Access is bounded by the `allow.private` / `allow.groups` allowlists in `config.json`; **a misconfigured allowlist can leak untrusted group content into the model or logs**. Do not allowlist groups you do not trust.
+
+**Disclaimer**
+
+Provided "as is" under MIT, without warranty of any kind. The author is not liable for account bans, data leakage, service interruption, or any other consequence of using this project.
