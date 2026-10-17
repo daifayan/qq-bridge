@@ -97,8 +97,10 @@ async function so360Search(query) {
 /** 主源 360，失败或空结果时兜底必应，避免单一搜索源挂掉后完全查不到。 */
 async function searchWeb(query) {
   const attempts = [];
+  let anySuccess = false;
   try {
     const primary = await so360Search(query);
+    anySuccess = true;
     if (primary.results.length > 0) return { ...primary, source: 'so.com' };
     attempts.push('so.com 返回 0 条');
   } catch (error) {
@@ -109,6 +111,8 @@ async function searchWeb(query) {
     return { ...fallback, source: 'bing.com', note: attempts.join('; ') };
   } catch (error) {
     attempts.push(`bing.com 失败:${error?.message ?? error}`);
+    // 两个源都挂了才算真失败：按工具错误上报，别伪装成"0 条结果"。
+    if (!anySuccess) throw new Error(attempts.join('; '));
     return { query, results: [], note: attempts.join('; ') };
   }
 }
