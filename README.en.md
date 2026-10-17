@@ -73,6 +73,20 @@ npm start
 
 Or double-click `start.bat` on Windows (guard mode with auto-restart).
 
+Optional but recommended for the Windows one-click launchers: copy
+`paths.bat.example` to `paths.bat` and edit it (on CMD:
+`copy paths.bat.example paths.bat`):
+
+| Field | Description |
+| --- | --- |
+| `NODE` | Absolute path to node.exe (>=22.13), e.g. the bundled `node-runtime\node.exe` or a system Node. Leave empty to use `node` from PATH |
+| `DSHBIN` | Absolute path to DSH's `lib/bin.js`. Leave empty for auto-detection (probes `$DSH_HOME` profiles) — usually nothing to fill in |
+| `DSHLNK` | Shortcut (.lnk) or batch file that starts DeepSeek Harness |
+| `DSHOPEN` | Optional script that opens the DSH page with a fresh token |
+| `SNOWDIR` | SnowLuma install directory (ships its own node.exe) — **required** |
+| `BRIDGEDIR` | This project's directory; empty means "wherever the scripts live" |
+| `LOGDIR` | Where bridge/DSH logs are written; empty defaults to `../bridge-logs` |
+
 ## DSH Setup on Another Device
 
 The bridge and console can run without extra DSH setup, but the two DSH chat presets (`qq-chat` and `qq-chat-v2`) and the MCP servers must be installed into DSH once per machine:

@@ -61,6 +61,20 @@ QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──�
 npm install        # 安装依赖（postinstall 会自动修补 @snowluma/sdk 的 ESM 打包 bug）
 ```
 
+复制 `paths.bat.example` 为 `paths.bat`（用一键启动脚本前建议先配好；只跑 `npm start` 可不配）：
+
+> Windows CMD 用户请用：`copy paths.bat.example paths.bat`
+
+| 字段 | 说明 |
+| --- | --- |
+| `NODE` | node.exe 绝对路径（需 ≥22.13）；**填包内 `node-runtime\node.exe` 或系统 Node 均可**；留空则用 PATH 里的 `node` |
+| `DSHBIN` | DSH 的 `lib/bin.js` 绝对路径；留空自动探测（从 `$DSH_HOME` 的 profiles 反查），一般不用填 |
+| `DSHLNK` | 启动 DSH 的快捷方式（.lnk）或批处理 |
+| `DSHOPEN` | 打开 DSH 页面并注入新 token 的脚本（可选） |
+| `SNOWDIR` | SnowLuma 安装目录（自带 node.exe），**必填** |
+| `BRIDGEDIR` | 本项目目录，留空即取脚本所在目录 |
+| `LOGDIR` | 桥接/DSH 日志目录，留空默认 `../bridge-logs` |
+
 复制 `config.example.json` 为 `config.json` 后编辑：
 
 > Windows CMD 用户请用：`copy config.example.json config.json`
