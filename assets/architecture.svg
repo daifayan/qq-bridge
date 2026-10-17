@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 400" width="1000" height="400" role="img" aria-label="qq-bridge architecture">
+  <rect width="1000" height="400" fill="#ffffff"/>
+  <text x="500" y="46" text-anchor="middle" font-family="system-ui,Segoe UI,Microsoft YaHei,sans-serif" font-size="25" font-weight="700" fill="#1f2328">qq-bridge 架构</text>
+  <text x="500" y="74" text-anchor="middle" font-family="system-ui,Segoe UI,Microsoft YaHei,sans-serif" font-size="13" fill="#57606a">QQ ↔ SnowLuma (OneBot v11) ↔ qq-bridge ↔ DeepSeek Harness</text>
+
+  <g font-family="system-ui,Segoe UI,Microsoft YaHei,sans-serif">
+    <rect x="30" y="130" width="180" height="100" rx="12" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+    <text x="120" y="172" text-anchor="middle" font-size="16" font-weight="600" fill="#1f2328">QQ 群 / 私聊</text>
+    <text x="120" y="196" text-anchor="middle" font-size="12" fill="#57606a">消息来源</text>
+
+    <rect x="270" y="130" width="180" height="100" rx="12" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+    <text x="360" y="166" text-anchor="middle" font-size="16" font-weight="600" fill="#1f2328">SnowLuma</text>
+    <text x="360" y="190" text-anchor="middle" font-size="12" fill="#57606a">OneBot v11</text>
+    <text x="360" y="208" text-anchor="middle" font-size="12" fill="#57606a">WebSocket / HTTP</text>
+
+    <rect x="510" y="130" width="180" height="100" rx="12" fill="#e8f0fe" stroke="#4f7cf7" stroke-width="2"/>
+    <text x="600" y="166" text-anchor="middle" font-size="16" font-weight="700" fill="#1a56db">qq-bridge</text>
+    <text x="600" y="190" text-anchor="middle" font-size="12" fill="#3b5bdb">本项目</text>
+    <text x="600" y="208" text-anchor="middle" font-size="12" fill="#3b5bdb">md→纯文本 / 工具限制</text>
+
+    <rect x="750" y="130" width="180" height="100" rx="12" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+    <text x="840" y="166" text-anchor="middle" font-size="16" font-weight="600" fill="#1f2328">DeepSeek</text>
+    <text x="840" y="190" text-anchor="middle" font-size="12" fill="#57606a">Harness Web API</text>
+    <text x="840" y="208" text-anchor="middle" font-size="12" fill="#57606a">Agent 会话</text>
+  </g>
+
+  <g stroke="#8b949e" stroke-width="2" fill="none">
+    <line x1="210" y1="180" x2="258" y2="180"/>
+    <line x1="450" y1="180" x2="498" y2="180"/>
+    <line x1="690" y1="180" x2="738" y2="180"/>
+  </g>
+  <g fill="#8b949e">
+    <polygon points="270,180 256,173 256,187"/>
+    <polygon points="510,180 496,173 496,187"/>
+    <polygon points="750,180 736,173 736,187"/>
+  </g>
+
+  <path d="M840 230 L840 300 L120 300 L120 234" stroke="#4f7cf7" stroke-width="2" fill="none" stroke-dasharray="6 4"/>
+  <polygon points="120,222 112,236 128,236" fill="#4f7cf7"/>
+  <text x="480" y="292" text-anchor="middle" font-family="system-ui,Segoe UI,Microsoft YaHei,sans-serif" font-size="13" fill="#3b5bdb">Agent 回复 → 转纯文本 / 分片 → 回发 QQ</text>
+</svg>
