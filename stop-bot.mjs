@@ -9,7 +9,11 @@
  * 只有命令行精确匹配桥接本体或 SnowLuma 运行时才算目标，且显式排除
  * MCP server、DSH 包装器、DSH 宿主、以及本脚本自身。
  *
- * 用法：双击 快速关闭.bat
+ * 用法：
+ *   面板 [Q]               只关 SnowLuma + QQ 桥接（DSH 不动）
+ *   双击 停止全部.bat      连 DSH 桌面端一起关（当前对话会中断）
+ *   node stop-bot.mjs --dry-run   只预演会停哪些进程，不真的动手
+ *   node stop-bot.mjs --all       连 DSH 一起停（会中断当前对话）
  */
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
@@ -18,6 +22,7 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 
+const DSH_PORT = 43129 // DSH 桌面端 harness 端口（旧 CLI Web 3080 已废弃）
 const PORTS = [3100, 3001, 3000, 5099] // 从最下游开始停
 const PORT_LABEL = {
   3100: 'QQ 桥接',
@@ -67,8 +72,11 @@ function tryJson(text) {
 }
 
 function listProcesses() {
+  // ⚠ 必须把 DSH Desktop.exe 列进来：2026-10-25 起 DSH 的真身是桌面端
+  // Electron 壳（壳 + 内嵌 harness + 渲染进程都叫这个名字），不再是
+  // node.exe 跑的 CLI runtime。漏了它，--all 就根本停不掉 DSH。
   const raw = ps(
-    `Get-CimInstance Win32_Process -Filter "Name='node.exe' or Name='cmd.exe'" | ` +
+    `Get-CimInstance Win32_Process -Filter "Name='node.exe' or Name='cmd.exe' or Name='DSH Desktop.exe'" | ` +
     `Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress`,
   )
   const parsed = tryJson(raw)
@@ -87,8 +95,9 @@ function listenersOn(port) {
  * 只有精确匹配才算，任何不确定的都返回 null（宁可不杀）。
  *
  * @param includeDsh --all 模式下才允许把 DSH 也算作目标（默认绝不碰 DSH）
+ * @param name 进程名（Win32_Process.Name）；桌面端靠它识别，比命令行稳
  */
-function classifyProcess(cmd, includeDsh = false) {
+function classifyProcess(cmd, includeDsh = false, name = '') {
   const line = String(cmd ?? '')
   if (!line) return null
 
@@ -96,6 +105,11 @@ function classifyProcess(cmd, includeDsh = false) {
   if (/stop-bot\.mjs/i.test(line)) return null // 本脚本自身
   if (/[\\/]mcp-[\w.-]*\.js/i.test(line)) return null // 三个 MCP server（不是桥接本体！）
   if (/[\\/]dsh-subprocess-local[\\/]/i.test(line)) return null // shell runner（临时子进程）
+
+  // DSH 桌面端（2026-10-25 起 DSH 的真身）：Electron 多进程，壳 / harness /
+  // 渲染进程都叫 DSH Desktop.exe。命令行里虽然也带 bin.js，但那是壳内嵌的
+  // harness，不是旧 CLI runtime —— 按进程名一刀切最稳，且只在 --all 放行。
+  if (/^DSH Desktop\.exe$/i.test(String(name ?? ''))) return includeDsh ? 'DSH' : null
 
   // DSH 相关：只有在 --all 模式才作为目标，否则一律跳过
   const isDshHost = /@deepseek-ai[\\/]dsh[\\/]lib[\\/]bin\.js/i.test(line)
@@ -138,17 +152,17 @@ const STOP_ALL = process.argv.includes('--all')
 const ASSUME_YES = process.argv.includes('--yes')
 
 console.log('========================================================================')
-console.log(STOP_ALL ? '  停止全部 —— DSH + SnowLuma + QQ 桥接' : '  快速关闭 —— SnowLuma + QQ 桥接')
-console.log(STOP_ALL ? '  （含 DSH：本对话会中断）' : '  （DSH 不受影响）')
+console.log(STOP_ALL ? '  停止全部 —— DSH 桌面端 + SnowLuma + QQ 桥接' : '  快速关闭 —— SnowLuma + QQ 桥接')
+console.log(STOP_ALL ? '  （含 DSH 桌面端：进行中的对话会中断）' : '  （DSH 桌面端不受影响）')
 if (DRY_RUN) console.log('  *** 试运行模式：只报告，不会真的停止任何进程 ***')
 console.log('========================================================================')
 console.log()
 
 // --all 且未 --yes 时，要求人工确认，避免误触
 if (STOP_ALL && !ASSUME_YES && !DRY_RUN) {
-  console.log('  ⚠ 你选择了“停止全部”，这会把 DSH 也关掉。')
+  console.log('  ⚠ 你选择了“停止全部”，这会把 DSH 桌面端也关掉。')
   console.log('     如果正在和 Agent 对话，该对话会立即中断。')
-  console.log('     机器人服务（SnowLuma / QQ 桥接）随时可用“DeepSeek 全家桶”重启。')
+  console.log('     重启：双击桌面「DSH Desktop」，或打开桌面「面板」选 1。')
   console.log()
   process.stdout.write('  确认要全部停止吗？输入 y 回车继续，其他任意键取消：')
   const answer = await new Promise((resolve) => {
@@ -246,7 +260,7 @@ for (const port of PORTS) {
   for (const pid of pids) {
     const proc = procs.find((p) => Number(p.ProcessId) === pid)
     const cmd = String(proc?.CommandLine ?? '')
-    const kind = classifyProcess(cmd)
+    const kind = classifyProcess(cmd, false, String(proc?.Name ?? ''))
     if (kind === null) {
       console.log(`     ${String(port).padEnd(5)} PID ${pid} 不是可停目标，跳过`)
       console.log(`           ${cmd.slice(0, 88)}`)
@@ -272,31 +286,66 @@ for (const port of [...PORTS].reverse()) {
   }
 }
 
-// ── 5) --all 时最后停 DSH（先包装器，后宿主；宿主一停，本脚本所在会话即中断）──
+// ── 5) --all 时最后停 DSH（先桌面端整棵树，后命令行 runtime 兜底）──
 if (STOP_ALL) {
   console.log()
-  console.log('· 停止 DSH（先包装器，后宿主）')
+  console.log('· 停止 DSH（先桌面端进程树，后命令行 runtime 兜底）')
+
+  // 5a) DSH Desktop.exe：Electron 多进程（主壳 + harness + 渲染进程）。
+  // 先杀"父进程"（/T 会带走整棵树），再扫一遍漏网的，避免二次报告噪音。
   procs = listProcesses()
-  const wrapper = procs.filter((p) => classifyProcess(p.CommandLine, true) === 'DSH' && /start-dsh\.mjs/i.test(String(p.CommandLine ?? '')))
-  const hosts = procs.filter((p) => classifyProcess(p.CommandLine, true) === 'DSH' && /@deepseek-ai[\\/]dsh[\\/]lib[\\/]bin\.js/i.test(String(p.CommandLine ?? '')))
-  for (const w of wrapper) {
-    console.log('     停止 DSH 包装器…')
-    kill(w.ProcessId, 'DSH 包装器', DRY_RUN)
+  let desktop = procs.filter((p) => /^DSH Desktop\.exe$/i.test(String(p.Name ?? '')))
+  if (desktop.length === 0) {
+    console.log('     没有发现 DSH 桌面端进程')
+  } else {
+    const pids = new Set(desktop.map((p) => Number(p.ProcessId)))
+    // 父进程（其父不在这堆里的）排前面，先砍它带走整棵树
+    const parentsFirst = [...desktop].sort((a, b) => {
+      const aIsChild = pids.has(Number(a.ParentProcessId)) ? 1 : 0
+      const bIsChild = pids.has(Number(b.ParentProcessId)) ? 1 : 0
+      return bIsChild - aIsChild
+    })
+    for (const d of parentsFirst) {
+      if (kill(d.ProcessId, 'DSH 桌面端', DRY_RUN)) stopped++
+    }
+    // 等 1.5 秒让树塌完，再扫漏网的（试运行什么都没杀，跳过这遍）
+    if (!DRY_RUN) {
+      await new Promise((r) => setTimeout(r, 1500))
+      procs = listProcesses()
+      desktop = procs.filter((p) => /^DSH Desktop\.exe$/i.test(String(p.Name ?? '')))
+      for (const d of desktop) {
+        if (kill(d.ProcessId, 'DSH 桌面端（残留）', DRY_RUN)) stopped++
+      }
+    }
   }
+
+  // 5b) 命令行 runtime 兜底：start-desktop-runtime.bat 拉起的
+  // node bin.js web --port 43129，以及它的包装窗口。
+  procs = listProcesses()
+  const runtimeWindows = procs.filter(
+    (p) => p.Name === 'cmd.exe' && /start-desktop-runtime\.bat/i.test(String(p.CommandLine ?? '')),
+  )
+  for (const w of runtimeWindows) {
+    if (kill(w.ProcessId, 'DSH runtime 包装窗口', DRY_RUN)) stopped++
+  }
+  const hosts = procs.filter(
+    (p) => p.Name === 'node.exe' && classifyProcess(p.CommandLine, true) === 'DSH',
+  )
   for (const h of hosts) {
-    console.log('     停止 DSH 宿主…（本脚本发出后连接会中断，属正常）')
-    kill(h.ProcessId, 'DSH 宿主', DRY_RUN)
+    if (kill(h.ProcessId, 'DSH runtime', DRY_RUN)) stopped++
   }
-  if (wrapper.length === 0 && hosts.length === 0) console.log('     没有发现 DSH 进程')
+  if (runtimeWindows.length === 0 && hosts.length === 0 && desktop.length === 0) {
+    console.log('     没有发现 DSH 进程')
+  }
 }
 
-// DSH 状态报告
-const dshPids = listenersOn(3080)
+// DSH 状态报告（端口已从废弃的 3080 迁到桌面端 harness 的 43129）
+const dshPids = listenersOn(DSH_PORT)
 console.log()
 if (STOP_ALL) {
-  console.log(`     DSH (3080) — ${dshPids.length ? `仍在运行 (PID ${dshPids.join(',')})，可能需要再运行一次` : '已关闭 ✅'}`)
+  console.log(`     DSH 桌面端 (${DSH_PORT}) — ${dshPids.length ? `仍在运行 (PID ${dshPids.join(',')})，可能需要再运行一次` : '已关闭 ✅'}`)
 } else {
-  console.log(`     DSH (3080) — ${dshPids.length ? `保持运行 (PID ${dshPids.join(',')})` : '未在运行'}`)
+  console.log(`     DSH 桌面端 (${DSH_PORT}) — ${dshPids.length ? `保持运行 (PID ${dshPids.join(',')})` : '未在运行'}`)
 }
 
 console.log()
@@ -304,10 +353,10 @@ console.log('===================================================================
 if (DRY_RUN) {
   console.log(`  ℹ 试运行结束：识别到 ${stopped} 个可停进程（未真的停止）。`)
   if (skipped > 0) console.log(`     另有 ${skipped} 个身份不符的进程被安全跳过。`)
-  console.log('     要真正关闭，请双击桌面“快速关闭机器人”。')
+  console.log('     要真正关闭：打开桌面「面板」选 Q（只关机器人）或 A（全关）。')
 } else if (stillOpen.length === 0) {
   console.log(`  ✅ 完成：停止 ${stopped} 个进程，机器人服务已全部关闭。`)
-  console.log('     重新开启：双击桌面“DeepSeek 全家桶”')
+  console.log('     重新开启：双击桌面「DSH Desktop」，或打开「面板」选 1。')
 } else {
   console.log(`  ⚠ 停止 ${stopped} 个，但有端口仍被占用：${stillOpen.join(', ')}`)
   console.log('     可能被守护进程重新拉起，请再运行一次本脚本。')

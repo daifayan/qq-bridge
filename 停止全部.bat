@@ -1,6 +1,6 @@
 @echo off
 setlocal
-title Stop All - DSH + SnowLuma + QQ Bridge
+title Stop All - DSH Desktop + SnowLuma + QQ Bridge
 call "%~dp0_node.bat"
 if not defined NODE_EXE (
   echo [ERROR] node.exe not found. Set NODE= in paths.bat, or install node on PATH.
@@ -10,15 +10,15 @@ if not defined NODE_EXE (
 set "SCRIPT=%~dp0stop-bot.mjs"
 
 echo ============================================================
-echo    STOP ALL  -  DSH + SnowLuma + QQ-Bridge
+echo    STOP ALL  -  DSH Desktop + SnowLuma + QQ-Bridge
 echo ============================================================
 echo.
-echo    WARNING: this also stops DSH (port 3080).
+echo    WARNING: this also stops the DSH Desktop app (port 43129).
 echo    If you are talking to the Agent right now, that
 echo    conversation will be interrupted.
 echo.
 echo    Restart later with the desktop shortcut:
-echo       DeepSeek Suite   (icon: whale)
+echo       DSH Desktop.lnk   or   Panel.lnk -^> choose 1
 echo.
 set "OK="
 set /p "OK=Type y then Enter to confirm (anything else cancels): "
