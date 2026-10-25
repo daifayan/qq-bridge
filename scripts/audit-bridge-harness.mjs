@@ -16,6 +16,9 @@ import * as slang from '../src/slang-learner.js';
 import * as sticker from '../src/sticker-lib.js';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
 import { createApiAdapter } from '../src/api-adapt.js';
+import { createTts } from '../src/tts.js';
+import { toSpeakable, hasSpeakableContent } from '../src/tts-text.js';
+import { decide, recordSpoken, createVoiceMemory } from '../src/voice-policy.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 export async function bridgeHarness({ config = {}, savedState, globals = {} } = {}) {
@@ -73,6 +76,7 @@ export async function bridgeHarness({ config = {}, savedState, globals = {} } = 
     NodeApiClient: class { constructor() { return api; } },
     SnowLumaWebSocketClient: FakeBot, text: (s) => s,
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector, createApiAdapter,
+    createTts, toSpeakable, hasSpeakableContent, decide, recordSpoken, createVoiceMemory,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...globals,
   });
