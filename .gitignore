@@ -9,6 +9,9 @@ config.json
 *.bak
 *.bak-*
 
+# 本地 TTS 模型（第三方权重，几十 MB，不进仓库；下载方法见 README「语音回复」）
+models/
+
 # Local development / planning / research docs (not part of public project)
 /PROJECT_GUIDE.md
 /ARCH_REVIEW.md
