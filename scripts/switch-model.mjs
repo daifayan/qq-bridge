@@ -120,7 +120,7 @@ async function ensureServices(cfg, { fix = true } = {}) {
     startBatDetached(BAT_SNOWLUMA, 'SnowLuma', 'SnowLuma');
     st.snowluma = await waitForPort(3001, 45_000);
     if (!st.snowluma) {
-      console.log('  ❌ SnowLuma 45 秒内没起来。检查：QQ 是否已登录？或双击【启动全家桶】手动来一遍。');
+      console.log('  ❌ SnowLuma 45 秒内没起来。检查：QQ 是否已登录？或打开桌面「面板」选 1 手动来一遍。');
       return { ...st, fatal: true };
     }
   }

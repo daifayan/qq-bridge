@@ -42,7 +42,7 @@ async function bridgeAlive() {
 if (!(await bridgeAlive())) {
   console.log('');
   console.log('  QQ 桥接没有在运行（端口 3100 没响应）。');
-  console.log('  先双击「启动全家桶.bat」把服务拉起来，再试一次。');
+  console.log('  先打开桌面「面板」选 1（或双击「启动桌面端套件.bat」）把服务拉起来，再试一次。');
   console.log('');
   process.exit(1);
 }
