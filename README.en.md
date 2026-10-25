@@ -10,6 +10,8 @@
 
 For the detailed Chinese guide, see **[docs/PROJECT_GUIDE.md](docs/PROJECT_GUIDE.md)**.
 
+Code review standards and PR process (Chinese): **[CODE_REVIEW.md](CODE_REVIEW.md)**.
+
 ## Architecture
 
 ```
