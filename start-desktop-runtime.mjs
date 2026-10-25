@@ -8,7 +8,7 @@
 //
 // 用法：node start-desktop-runtime.mjs   （或双击 start-desktop-runtime.bat）
 import { spawn } from 'node:child_process'
-import { appendFileSync, mkdirSync } from 'node:fs'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -19,6 +19,17 @@ const DSH_BIN = 'C:\\Users\\hzm10\\AppData\\Local\\Doubao\\User Data\\sandbox_ru
 const NODE = 'C:\\Users\\hzm10\\AppData\\Local\\Doubao\\User Data\\sandbox_runtime\\bases\\c98c5042338ed152c6f10ecd8591889f\\node\\node.exe'
 
 mkdirSync(dirname(LOG), { recursive: true })
+
+// DSH 的 agent preset 用相对路径 ./qq-tool-restrict.mjs，加载时却按 profile 根目录解析。
+// 该文件缺失时 DSH 能启动，但 QQ 会话会以 “never started” 拒绝创建，表现为机器人已读不回。
+// 启动前从已安装 preset 补一份，幂等且不覆盖已有内容。
+const PRESET_PLUGIN = join(DSH_HOME, '.agent-presets', 'qq-chat-v2', 'qq-tool-restrict.mjs')
+const PROFILE_PLUGIN = join(DSH_HOME, 'profiles', 'web', 'qq-tool-restrict.mjs')
+if (!existsSync(PROFILE_PLUGIN) && existsSync(PRESET_PLUGIN)) {
+  mkdirSync(dirname(PROFILE_PLUGIN), { recursive: true })
+  copyFileSync(PRESET_PLUGIN, PROFILE_PLUGIN)
+  appendFileSync(LOG, `[startup] restored missing profile plugin: ${PROFILE_PLUGIN}\n`)
+}
 
 const child = spawn(NODE, [DSH_BIN, 'web', '--port', '43129', '--no-open'], {
   env: { ...process.env, DSH_HOME },
