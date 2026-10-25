@@ -21,27 +21,41 @@ import { AbstractApiClient } from '@deepseek-ai/dsh-host-apiproxy/client';
  * 搜索顺序：
  * 1. `$DSH_HOME/guard/logs` —— 上游 DSH 的标准落点；
  * 2. `$DSH_HOME/logs/` —— 部分部署（含本机 Doubao 沙箱运行时）把启动日志写在这里；
- * 3. 本仓库相邻的 `bridge-logs/` —— 由 `start-dsh.mjs` 启动包装器落盘。
+ * 3. 本仓库相邻的 `bridge-logs/` —— 由 `start-dsh.mjs` 启动包装器落盘；
+ * 4. `%APPDATA%/dsh-desktop/logs/harness.log` —— DSH Desktop（Electron 壳）
+ *    内嵌的 `dsh web`，端口固定 43129，token 由壳 tee 到这个日志。
  *
  * 这台机器的 DSH 由 `启动DeepSeekHarness.bat` 经 `start-dsh.mjs` 拉起，
  * 所以第 3 条是实际生效的那条；DSH 重启后换新 token 也会被自动读到，
  * 无需再手工把 token 抄进 config.json。
+ *
+ * baseUrl 决定要哪个端口的 token：启动日志里 token 的 URL 自带端口
+ * （`http://127.0.0.1:3080/?token=...` / `http://127.0.0.1:43129/?token=...`），
+ * 按端口过滤才不会把另一个实例的死 token 捡回来（死 token 换 cookie 只会 401，
+ * 而 invalidateAuth 又会重新发现 → 死循环）。
  */
-export function discoverDshLaunchToken() {
+export function discoverDshLaunchToken(baseUrl) {
+  let port = '';
+  try {
+    const u = new URL(baseUrl ?? 'http://127.0.0.1:3080');
+    port = u.port || (u.protocol === 'https:' ? '443' : '80');
+  } catch { /* baseUrl 不可解析时退回不过滤端口 */ }
   try {
     const here = path.dirname(fileURLToPath(import.meta.url));
     const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+    const roaming = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
     const logDirs = [
       path.join(home, 'guard', 'logs'),
       path.join(home, 'logs'),
       path.join(here, '..', 'bridge-logs'),
       path.join(here, '..', '..', 'bridge-logs'),
+      path.join(roaming, 'dsh-desktop', 'logs'),
     ];
     for (const logsDir of logDirs) {
       let files;
       try {
         files = fs.readdirSync(logsDir)
-          .filter((name) => /^server-.*\.out\.log$/.test(name))
+          .filter((name) => /^server-.*\.out\.log$/.test(name) || name === 'harness.log')
           .map((name) => ({ name, mtime: fs.statSync(path.join(logsDir, name)).mtimeMs }))
           .sort((a, b) => b.mtime - a.mtime);
       } catch {
@@ -50,6 +64,12 @@ export function discoverDshLaunchToken() {
       for (const { name } of files) {
         try {
           const text = fs.readFileSync(path.join(logsDir, name), 'utf8');
+          if (port) {
+            // 带端口的精确匹配；文件里没有目标端口的 token 就继续看下一个文件。
+            const scoped = [...text.matchAll(new RegExp(`https?://127\\.0\\.0\\.1:${port}/\\?token=([A-Za-z0-9_-]+)`, 'g'))];
+            if (scoped.length > 0) return scoped[scoped.length - 1][1];
+            continue;
+          }
           const matches = [...text.matchAll(/[?&]token=([A-Za-z0-9_-]+)/g)];
           if (matches.length > 0) return matches[matches.length - 1][1];
         } catch {
@@ -142,7 +162,7 @@ export class NodeApiClient extends AbstractApiClient {
     this._authEpoch += 1;
     this.cookie = null;
     this.cookiePromise = null;
-    const discovered = discoverDshLaunchToken();
+    const discovered = discoverDshLaunchToken(this.baseUrl);
     if (discovered) this.launchToken = discovered;
   }
 
@@ -150,7 +170,10 @@ export class NodeApiClient extends AbstractApiClient {
   async ensureAuth(signal) {
     signal?.throwIfAborted();
     if (this.cookie) return this.cookie;
-    if (!this.launchToken) throw new Error('DSH auth token missing: set dsh.authToken in config.json (or let auto-discovery read it from DSH guard logs)');
+    // 配置里没填 token 时，每次尝试前都重新发现一次：
+    // DSH 可能还没起来（发现不到），5 秒后的 checkDsh 会再试，起来后自动恢复。
+    if (!this.launchToken) this.launchToken = discoverDshLaunchToken(this.baseUrl);
+    if (!this.launchToken) throw new Error('DSH auth token missing: set dsh.authToken in config.json (or let auto-discovery read it from DSH launch logs)');
     if (this.cookiePromise) return waitWithSignal(this.cookiePromise, signal);
     const promise = (async () => {
       const epoch = this._authEpoch;
@@ -596,6 +619,118 @@ export function unwrap(response, label) {
   if (response.result.ok) return response.result.value;
   const { code, message } = response.result.error;
   throw new Error(`${label} failed: ${code}: ${message}`);
+}
+
+/**
+ * 协议握手：**探测实际端点**，而不是问版本号。
+ *
+ * 背景（2026-10-25 实测）：`host/describe` 虽然在客户端类型定义里存在，但 DSH 0.2.0-rc.2
+ * 的服务端**没有实现**它（404）。所以任何"先问版本再决定能不能用"的方案都会假阴性。
+ * 真正决定兼容性的是端点行为本身，因此这里直接打三个关键端点：
+ *   - settings/describe —— 桥接的探活与模式来源
+ *   - agentPresets/list —— preset 清单
+ *   - session/list      —— 会话门面
+ *
+ * 返回 { total, ok, missing, endpoints }。全部失败时抛错（交给 classifyDshFailure 分类），
+ * 部分失败不抛：桥接能降级的部分继续跑，但要如实把缺的端点报出来。
+ */
+export async function probeDshProtocol(client, signal) {
+  const probes = [
+    { label: 'settings', method: 'settings.describe', payload: {} },
+    { label: 'presets', method: 'agentPresets.list', payload: {} },
+    { label: 'sessions', method: 'session.list', payload: { cwd: process.cwd() } },
+  ];
+  const endpoints = {};
+  const missing = [];
+  let lastError = null;
+  for (const probe of probes) {
+    try {
+      const response = await client.callUnary(probe.method, probe.payload, signal);
+      if (response.result?.ok) {
+        endpoints[probe.label] = true;
+      } else {
+        endpoints[probe.label] = false;
+        missing.push(probe.label);
+        lastError = new Error(`${probe.method} rejected (${response.result?.error?.code ?? 'unknown'})`);
+        lastError.dshCode = response.result?.error?.code;
+      }
+    } catch (error) {
+      endpoints[probe.label] = false;
+      missing.push(probe.label);
+      lastError = error;
+    }
+  }
+  const ok = probes.length - missing.length;
+  if (ok === 0 && lastError) throw lastError;
+  return { total: probes.length, ok, missing, endpoints };
+}
+
+/**
+ * 尽力读取**磁盘上**的 DSH 版本号（运行中的进程版本可能与之不同，只作参考）。
+ *
+ * 为什么读磁盘：服务端没有版本接口（见 probeDshProtocol 的说明），启动日志里也不打印版本。
+ * 为什么是"尽力"：DSH 可能装在任意位置，找不到就返回空串——版本号只用于日志和排障展示，
+ * 不参与任何兼容性判断，所以拿不到也不影响功能。
+ */
+export function detectLocalDshVersion() {
+  const home = os.homedir();
+  const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+  const localAppData = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+  const candidates = [
+    // 全局 npm 安装
+    path.join(appData, 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
+    // 桥接自己依赖树里可能被提升上来的副本
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
+  ];
+  // Doubao 沙箱运行时（本机 DSH Desktop 实际使用的那份），bases 下可能有多个版本，取最新的。
+  try {
+    const basesDir = path.join(localAppData, 'Doubao', 'User Data', 'sandbox_runtime', 'bases');
+    const entries = fs.readdirSync(basesDir)
+      .map((base) => path.join(basesDir, base, 'node', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'))
+      .map((file) => {
+        try { return { file, mtime: fs.statSync(file).mtimeMs }; } catch { return null; }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.mtime - a.mtime);
+    candidates.push(...entries.map((entry) => entry.file));
+  } catch { /* 没有这个目录就算了 */ }
+  for (const file of candidates) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (pkg?.name === '@deepseek-ai/dsh' && typeof pkg.version === 'string' && pkg.version) {
+        return { version: pkg.version, source: file };
+      }
+    } catch { /* 单个候选读不到就继续 */ }
+  }
+  return { version: '', source: '' };
+}
+
+/**
+ * 把「连不上 DSH」分类，供启动诊断出声用。
+ *
+ * 分类的意义：**连不上**（DSH 没起，等它就行）和**协议不兼容**（代码要改）是完全不同的
+ * 两件事。以前两者都走同一个空 catch，结果就是老大最讨厌的静默失败——日志里一行线索都没有。
+ *
+ * kind:
+ * - unreachable —— 端口没人听 / 网络层失败。属于正常等待态。
+ * - auth        —— 401 / token 换取失败。检查 dsh.authToken 或 DSH 是否刚重启换了 token。
+ * - protocol    —— 404 / 端点不存在 / 响应信封结构不对。DSH 大版本升级的信号，需要改代码。
+ * - unknown     —— 其余，原样带出去，别吞。
+ */
+export function classifyDshFailure(error) {
+  const message = String(error?.message ?? error ?? '');
+  const code = String(error?.cause?.code ?? error?.code ?? error?.dshCode ?? '');
+  const both = `${message} ${code}`;
+  if (/ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EHOSTUNREACH|fetch failed|socket hang up|network error/i.test(both)) {
+    return { kind: 'unreachable', detail: message || code };
+  }
+  if (/\b401\b|unauthorized|token exchange failed|auth token missing/i.test(both)) {
+    return { kind: 'auth', detail: message || code };
+  }
+  if (/\b404\b|not[\s-]?found|unknown endpoint|no such method|invalid server-response|method.*not.*support/i.test(both)) {
+    return { kind: 'protocol', detail: message || code };
+  }
+  return { kind: 'unknown', detail: message || code };
 }
 
 /** 在会话事件流里收集一次 turn 的 assistant 文本（按 turn 分组）。 */

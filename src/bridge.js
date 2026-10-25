@@ -12,7 +12,7 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
-import { NodeApiClient, unwrap, createTurnCollector, discoverDshLaunchToken } from './dsh-client.js';
+import { NodeApiClient, unwrap, createTurnCollector, discoverDshLaunchToken, probeDshProtocol, detectLocalDshVersion, classifyDshFailure } from './dsh-client.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
 import { SENSITIVE_RE } from './sensitive.js';
 import { looksLikeUnfinished } from './v2-wait.js';
@@ -530,8 +530,8 @@ function loadConfig() {
     }
   };
 
-  // 新版 DSH 的 launch token 每次启动会变；配置里没填时自动从 DSH guard 日志发现。
-  if (!cfg.dsh.authToken) cfg.dsh.authToken = discoverDshLaunchToken();
+  // 新版 DSH 的 launch token 每次启动会变；配置里没填时自动从 DSH 启动日志发现（按 baseUrl 端口过滤）。
+  if (!cfg.dsh.authToken) cfg.dsh.authToken = discoverDshLaunchToken(cfg.dsh.baseUrl);
 
   return cfg;
 }
@@ -1896,13 +1896,52 @@ async function main() {
       flushingQueue = false;
     }
   };
+  // DSH 连接诊断：只在结论变化时出声（避免每 5 秒刷屏），但绝不静默。
+  // 这是「版本解耦」的运行时那一半：连不上 = 等它起来；协议不通 = 出声报警，光重启没用。
+  let dshDiagKind = 'init';
+  let dshHostInfo = null;
+  const reportDshDiag = (diag) => {
+    if (diag.kind === dshDiagKind) return;
+    dshDiagKind = diag.kind;
+    const brief = String(diag.detail ?? '').slice(0, 160);
+    if (diag.kind === 'unreachable') {
+      log(`DSH 暂不可用（${brief}），QQ 消息入队等待`);
+    } else if (diag.kind === 'auth') {
+      log(`⚠️ DSH 鉴权失败：${brief}。检查 config.json 的 dsh.authToken；留空时由启动日志自动发现，DSH 重启换 token 后会自动重连`);
+    } else if (diag.kind === 'protocol') {
+      log(`⚠️ DSH 协议不兼容：${brief}。settings/describe 打不通说明 API 协议已变更（桥接适配的是斜杠 endpoint + {args} 包装），需要更新 src/dsh-client.js，重启没用`);
+    } else {
+      log(`⚠️ DSH 探测异常：${brief}`);
+    }
+  };
+
+  // 记一次握手结果，排障时能确认「桥接连的到底是哪个 DSH、哪些端点通」。
+  const recordDshHandshake = (info) => {
+    try {
+      fs.writeFileSync(path.join(STATE_DIR, 'dsh-protocol.json'), JSON.stringify({
+        baseUrl: cfg.dsh.baseUrl,
+        version: info.version || '',
+        versionSource: info.versionSource || '',
+        endpoints: info.endpoints ?? {},
+        missing: info.missing ?? [],
+        handshakeAt: new Date().toISOString()
+      }, null, 2));
+    } catch (error) {
+      log('写入 state/dsh-protocol.json 失败:', error?.message ?? error);
+    }
+  };
+
   const checkDsh = async () => {
     let ok = false;
+    let probeError = null;
     try {
       await api.settings.describe({});
       ok = true;
-    } catch {}
+    } catch (error) {
+      probeError = error;
+    }
     if (ok) {
+      dshDiagKind = 'ready';
       await refreshMode();
       // DSH 起来后拉一次 preset 清单；DSH 重启（dshReady 由 false 变 true）时再拉一次。
       if (!dshReady || dshPresetIds.length === 0) {
@@ -1913,6 +1952,20 @@ async function main() {
         dshReady = true;
         lastMode = currentMode;
         log(`DSH 已就绪（模式: ${currentMode}）`);
+        // 就绪转换时握手一次：探测关键端点是否都在，并尽力读出磁盘上的 DSH 版本。
+        // 部分端点缺失不致命（降级继续跑），但要如实说出来。
+        try {
+          dshHostInfo = await probeDshProtocol(api);
+          const local = detectLocalDshVersion();
+          dshHostInfo.version = local.version;
+          dshHostInfo.versionSource = local.source;
+          const missingNote = dshHostInfo.missing.length ? `，缺端点 ${dshHostInfo.missing.join('/')}` : '';
+          log(`DSH 握手：协议端点 ${dshHostInfo.ok}/${dshHostInfo.total}${missingNote}${local.version ? `，磁盘版本 v${local.version}` : '，版本未知'}`);
+          recordDshHandshake(dshHostInfo);
+        } catch (error) {
+          const diag = classifyDshFailure(error);
+          log(`⚠️ DSH 协议探测失败（${diag.kind}）：${String(diag.detail).slice(0, 160)}。关键端点全部不可用，桥接无法工作`);
+        }
         if (currentMode === 'reserved2') {
           // 首次确定模式为 reserved2 后再恢复持久化的有限睡眠定时器，
           // 避免在 initial chat 模式下设置定时器导致 timeout 唤醒被模式守卫吞掉。
@@ -1945,9 +1998,17 @@ async function main() {
         log(`桥接模式已切换为: ${currentMode}`);
         lastMode = currentMode;
       }
-    } else if (dshReady) {
+    } else {
+      const wasReady = dshReady;
       dshReady = false;
-      log('⚠️ DSH 不可用（重启中？），QQ 消息将入队等待');
+      const diag = classifyDshFailure(probeError);
+      // 从就绪掉线单独强调一次；其余交给分类器（它只在结论变化时出声）。
+      if (wasReady && diag.kind === 'unreachable') {
+        dshDiagKind = 'unreachable';
+        log('⚠️ DSH 断开（重启中？），QQ 消息将入队等待');
+      } else {
+        reportDshDiag(diag);
+      }
     }
   };
   function startDshWatch() {
@@ -1976,6 +2037,7 @@ async function main() {
       return {
         status: JSON.stringify([
           currentMode, closedAgentPreset, rs.role ?? null, rs.mode ?? 'active', !!dshReady,
+          dshHostInfo?.version ?? '', dshHostInfo?.missing?.join(',') ?? '',
           String(cfg.ownerQQ ?? ''), cfg.allow ?? null, cfg.deny ?? null,
           pendingWakeKeys.size, [...pendingWakeKeys].sort().join(',')
         ]),
@@ -2338,6 +2400,9 @@ async function main() {
             role: rs.role ?? null,
             roleMode: rs.mode ?? 'active',
             dshReady,
+            // 握手结果（连上后才有值）。排障第一眼看这里：连的是网页端还是桌面端、端点齐不齐。
+            dshVersion: dshHostInfo?.version || null,
+            dshProtocol: dshHostInfo ? `${dshHostInfo.ok}/${dshHostInfo.total}` : null,
             ownerQQ: cfg.ownerQQ ?? null,
             allowGroups: cfg.allow?.groups ?? [],
             allowPrivate: cfg.allow?.private ?? [],
@@ -6259,7 +6324,11 @@ async function main() {
       }
       if (applied) return;
       log(`设置会话模型失败 ${sessionId}（${tag}，第 ${attempt}/3 次）: ${lastError?.message ?? lastError}`);
-      apiAdapter.reportFailure(pick.provider, pick.model);
+      // 只有 provider 类错误才让 autoAdapt 记失败换候选；「会话不存在」这类本会话问题
+      // 不能连坐模型（2026-10-24：一次会话失效把三个候选全拖进 600s 冷却，新会话全线选不出模型）。
+      if (PROVIDER_ERROR_RE.test(String(lastError?.message ?? lastError))) {
+        apiAdapter.reportFailure(pick.provider, pick.model);
+      }
       if (attempt < 3) await sleep(1000);
     }
   }

@@ -8,7 +8,7 @@
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
-import { NodeApiClient, unwrap, createTurnCollector, discoverDshLaunchToken } from './dsh-client.js';
+import { NodeApiClient, unwrap, createTurnCollector, discoverDshLaunchToken, probeDshProtocol, detectLocalDshVersion, classifyDshFailure } from './dsh-client.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -40,7 +40,7 @@ async function main() {
   try {
     const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
     auth = {
-      token: cfg.dsh?.authToken || discoverDshLaunchToken(),
+      token: cfg.dsh?.authToken || discoverDshLaunchToken(baseUrl),
       header: cfg.dsh?.authHeader,
       prefix: cfg.dsh?.authPrefix
     };
@@ -51,6 +51,18 @@ async function main() {
 
   const desc = unwrap(await api.settings.describe({}), 'settings.describe');
   console.log('✅ DSH 连接成功:', JSON.stringify(desc).slice(0, 200));
+
+  // 协议握手：探测关键端点 + 读磁盘版本，明确告诉用户「连的是什么、缺什么」。
+  try {
+    const probe = await probeDshProtocol(api);
+    const local = detectLocalDshVersion();
+    const missingNote = probe.missing.length ? `，缺端点 ${probe.missing.join('/')}` : '';
+    console.log(`✅ DSH 握手: 协议端点 ${probe.ok}/${probe.total}${missingNote}${local.version ? `，磁盘版本 v${local.version}` : '，版本未知'}`);
+  } catch (error) {
+    const diag = classifyDshFailure(error);
+    console.log(`⚠️ DSH 协议探测失败（${diag.kind}）: ${String(diag.detail).slice(0, 160)}`);
+    if (diag.kind === 'protocol') console.log('   → 对端 API 协议可能已变更，需要更新 src/dsh-client.js');
+  }
 
   // 独立测试会话，cwd 用临时目录
   const cwd = path.join(ROOT, 'state', 'self-test');

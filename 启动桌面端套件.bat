@@ -1,0 +1,108 @@
+@echo off
+REM ============================================================
+REM  Desktop Suite one-click start (2026-10-24)
+REM    Desktop DSH runtime (43129) + SnowLuma (5099/3000/3001) + QQ-Bridge (3100)
+REM
+REM  Use this instead of the old family bucket (which starts DSH Web 3080):
+REM  the bridge now points at the desktop harness runtime on 43129.
+REM  Run by double-clicking. Services started from an agent session
+REM  die when that session ends - this one does not.
+REM
+REM  Keep this file PURE ASCII: cmd reads .bat byte-wise and a
+REM  non-ASCII path here corrupts the rest of the script.
+REM ============================================================
+setlocal enabledelayedexpansion
+title Desktop Suite - One-Click Start
+
+set "HERE=%~dp0"
+if exist "%HERE%paths.bat" call "%HERE%paths.bat"
+if not defined BRIDGEDIR set "BRIDGEDIR=%HERE%"
+if not defined SNOWDIR set "SNOWDIR=%HERE%..\SnowLuma"
+
+echo ============================================================
+echo    Desktop Suite - One-Click Start
+echo    Desktop runtime(43129) + SnowLuma(5099/3000/3001) + QQ-Bridge(3100)
+echo ============================================================
+echo.
+echo    QQ must be running and logged in: SnowLuma attaches to QQ.
+echo.
+
+REM ---- 1) Desktop DSH runtime (43129) ---------------------------
+netstat -ano | findstr ":43129 " | findstr "LISTENING" >nul 2>&1
+if !errorlevel!==0 (
+  echo [1/3] Desktop DSH : already running on 43129 - skipped
+) else (
+  echo [1/3] Desktop DSH : starting... a console window will stay open
+  if exist "%BRIDGEDIR%\start-desktop-runtime.bat" (
+    start "DSH Desktop Runtime" "%BRIDGEDIR%\start-desktop-runtime.bat"
+  ) else (
+    echo       [ERROR] start-desktop-runtime.bat missing in %BRIDGEDIR%
+  )
+)
+
+REM ---- 2) SnowLuma -----------------------------------------------
+netstat -ano | findstr ":5099 " | findstr "LISTENING" >nul 2>&1
+if !errorlevel!==0 (
+  echo [2/3] SnowLuma    : already running on 5099 - skipped
+) else (
+  echo [2/3] SnowLuma    : starting...
+  if exist "%BRIDGEDIR%\start-snowluma.bat" (
+    start "SnowLuma" /min "%BRIDGEDIR%\start-snowluma.bat"
+  ) else (
+    echo       [ERROR] start-snowluma.bat missing in %BRIDGEDIR%
+  )
+)
+
+echo.
+echo       waiting for the OneBot HTTP API on 3000 ...
+set "ONEBOT=0"
+set "BOTUIN=3838778152"
+REM Token is read from config.json at runtime - never hardcode secrets in a
+REM committed file (config.json itself is gitignored).
+set "BOTTOKEN="
+for /f "usebackq delims=" %%t in (`powershell -NoProfile -Command "try{(ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText('%BRIDGEDIR%\config.json',[System.Text.Encoding]::UTF8))).snowluma.accessToken}catch{''}"`) do set "BOTTOKEN=%%t"
+if not defined BOTTOKEN echo       [WARN] snowluma.accessToken not found in config.json - OneBot check will likely fail
+for /l %%i in (1,1,30) do (
+  if !ONEBOT!==0 (
+    curl.exe -s -m 3 -X POST -H "content-type: application/json" -H "Authorization: Bearer !BOTTOKEN!" -d "{}" http://127.0.0.1:3000/get_login_info > "%TEMP%\dsh-onebot-check.json" 2>nul
+    findstr /c:"!BOTUIN!" "%TEMP%\dsh-onebot-check.json" >nul 2>&1
+    if !errorlevel!==0 (
+      set "ONEBOT=1"
+    ) else (
+      ping -n 3 127.0.0.1 >nul 2>&1
+    )
+  )
+)
+if !ONEBOT!==1 (
+  echo       OneBot is UP and verified as the bot account !BOTUIN!
+) else (
+  echo       *** OneBot did NOT answer as the bot account after ~60s.
+  echo           Check QQ login and SnowLuma OneBot config.
+)
+
+REM ---- 3) QQ-Bridge ----------------------------------------------
+netstat -ano | findstr ":3100 " | findstr "LISTENING" >nul 2>&1
+if !errorlevel!==0 (
+  echo [3/3] QQ-Bridge   : already running on 3100 - skipped
+) else (
+  echo [3/3] QQ-Bridge   : starting... daemon, auto-restarts on crash
+  if exist "%BRIDGEDIR%\start.bat" (
+    start "qq-bridge" /min "%BRIDGEDIR%\start.bat"
+  ) else (
+    echo       [ERROR] start.bat missing in %BRIDGEDIR%
+  )
+)
+
+echo.
+echo ============================================================
+echo    Done.
+echo ============================================================
+timeout /t 6 /nobreak >nul
+start "" "http://127.0.0.1:3100/"
+
+echo    Desktop runtime  43129  (console window stays open)
+echo    QQ-Bridge console  http://127.0.0.1:3100/
+echo    SnowLuma WebUI     http://127.0.0.1:5099/
+echo.
+echo    You can close THIS window; the services keep running.
+echo.

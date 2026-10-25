@@ -10,12 +10,14 @@
 
 把 QQ 消息接入 DSH agent：QQ 好友/群发来的消息会变成 DSH 会话里的用户消息，agent 的回复（含提问、工具审批）会发回 QQ。
 
-> ⚠️ **当前版本 `v0.1.5`，适配 DSH 0.1.5-rc.1**（在该版本上逐项实测）。使用 Cookie 鉴权、斜杠 RPC 和 `/api/remote.mux` 事件流；这一代协议自 DSH `0.1.2-alpha.1` 起引入，与更早的点号 endpoint 协议不兼容——**DSH `0.1.1-rc.2` 及更早**请改用 tag [`v0.1.0`](https://github.com/daifayan/qq-bridge/releases/tag/v0.1.0)。
+> ⚠️ **当前版本 `v0.1.6`，实测兼容 DSH `0.1.5-rc.1` ~ `0.2.0-rc.2`**（含 DSH Desktop 桌面端内嵌内核，端口 `43129`）。使用 Cookie 鉴权、斜杠 RPC 和 `/api/remote.mux` 事件流；这一代协议自 DSH `0.1.2-alpha.1` 起引入，与更早的点号 endpoint 协议不兼容——**DSH `0.1.1-rc.2` 及更早**请改用 tag [`v0.1.0`](https://github.com/daifayan/qq-bridge/releases/tag/v0.1.0)。
+>
+> **桥接认协议、不认版本号**：启动时探测三个关键端点（`settings/describe`、`agentPresets/list`、`session/list`）确认协议在位，把探测结果与磁盘上的 DSH 版本一起写进日志和 `state/dsh-protocol.json`。连不上（等它起来）、鉴权失败（查 token）、协议不兼容（要改代码）三类问题分别出声，不会静默挂死。
 >
 > 默认分支 `master` **就是**本版本，`git clone` 直接拿到，无需切换分支。
 
 ```
-QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──► DSH Web API (127.0.0.1:3080/api)
+QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──► DSH Web API (127.0.0.1:3080/api，桌面端 43129)
                                                 ▲                      │
                                                 └── agent 回复/提问/审批 ┘
 ```
@@ -53,7 +55,7 @@ QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──�
 
 ## 前置条件
 
-1. 运行中的 DeepSeek Harness Web（默认 `http://127.0.0.1:3080`）
+1. 运行中的 DeepSeek Harness（网页端默认 `http://127.0.0.1:3080`；**DSH Desktop 桌面端为 `http://127.0.0.1:43129`**）
 2. 运行中的 SnowLuma，且配置好 OneBot WebSocket 与 HTTP API（默认 `ws://127.0.0.1:3001` / `http://127.0.0.1:3000`，`accessToken` 视配置填写）
 3. Node.js ≥ 22.13
 
@@ -85,7 +87,7 @@ npm install        # 安装依赖（postinstall 会自动修补 @snowluma/sdk �
 
 | 字段 | 说明 |
 | --- | --- |
-| `dsh.baseUrl` | DSH Web 地址，默认 `http://127.0.0.1:3080` |
+| `dsh.baseUrl` | DSH 地址，网页端默认 `http://127.0.0.1:3080`，DSH Desktop 桌面端用 `http://127.0.0.1:43129` |
 | `dsh.provider` / `dsh.model` / `dsh.reasoningEffort` | DSH 会话使用的模型/推理强度；若你的 DSH 没有示例中的模型，改成 DSH 设置页里可用的模型即可（选择失败只打日志，不阻塞启动） |
 | `dsh.authToken` | DSH launch token（新版 DSH 用于换取 Cookie 的进程启动 token）。留空时桥接会自动从 `~/.dsh/guard/logs/server-*.out.log` 发现；DSH 重启后遇到 401 也会自动重新发现并换 Cookie |
 | `dsh.authHeader` / `dsh.authPrefix` | 保留字段，当前新版 DSH 链路使用 Cookie 交换，不再直接发送该鉴权头 |
@@ -122,7 +124,7 @@ node scripts/setup-dsh.mjs
 共 6 步。DSH 已安装并运行，缺的是 SnowLuma 本体 + 桥接侧的 DSH 端安装（**第 2、3 步最容易漏，漏了 QQ 上会毫无反应**）：
 
 1. **DSH**（已运行，无需操作）
-   确认 `http://127.0.0.1:3080` 能打开即可。
+   确认 `http://127.0.0.1:3080`（桌面端 `43129`）能打开即可。
 
 2. **装桥接并复制配置**
    ```bash
