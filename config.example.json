@@ -37,6 +37,36 @@
   "security": {
     "interceptNotify": true
   },
+  "voice": {
+    "enabled": false,
+    "replaceText": true,
+    "engine": "local",
+    "scope": "private",
+    "maxChars": 60,
+    "minChars": 2,
+    "probability": 0.35,
+    "emotionBoost": 0.35,
+    "cooldownMs": 120000,
+    "hourlyCapPerConv": 4,
+    "dailyCap": 40,
+    "quietHours": null,
+    "timeoutMs": 25000,
+    "local": {
+      "modelDir": "models/vits-piper-zh_CN-xiao_ya-medium-int8",
+      "modelFile": "",
+      "sid": 0,
+      "speed": 1,
+      "numThreads": 2,
+      "provider": "cpu"
+    },
+    "http": {
+      "url": "",
+      "method": "POST",
+      "queryTemplate": "text={text}",
+      "headers": {},
+      "extraBody": {}
+    }
+  },
   "slang": {
     "enabled": true,
     "extractMinMessages": 10,

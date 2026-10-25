@@ -18,6 +18,9 @@ import { SENSITIVE_RE } from './sensitive.js';
 import { looksLikeUnfinished } from './v2-wait.js';
 import { safeFetchBuffer, looksLikeImageBuffer } from './safe-fetch.js';
 import { createApiAdapter } from './api-adapt.js';
+import { createTts } from './tts.js';
+import { toSpeakable, hasSpeakableContent } from './tts-text.js';
+import { decide, recordSpoken, createVoiceMemory } from './voice-policy.js';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import {
   loadSlang,
@@ -309,6 +312,43 @@ function loadConfig() {
       interceptNotify: true,
       ...(file.security ?? {})
     },
+    // 语音回复：默认关。开了以后，短句/情绪浓的回复偶尔会补一条语音（策略见 voice-policy.js）。
+    voice: (() => {
+      const v = file.voice ?? {};
+      return {
+        enabled: false,
+        replaceText: true,          // true = 发语音的那条就不再发同样的文字（去重）
+        engine: 'local',            // local = 本地 sherpa-onnx；http = 外部 TTS 服务
+        scope: 'private',           // off / owner / private / all
+        maxChars: 60,               // 超过这个字数只发文字
+        minChars: 2,
+        probability: 0.35,          // 基础概率，情绪分越高越容易发
+        emotionBoost: 0.35,
+        cooldownMs: 120000,         // 同一会话两条语音至少隔这么久
+        hourlyCapPerConv: 4,
+        dailyCap: 40,
+        quietHours: null,           // 例如 [23, 8]：这段时间不发语音
+        timeoutMs: 25000,
+        ...v,
+        local: {
+          modelDir: 'models/vits-piper-zh_CN-xiao_ya-medium-int8',
+          modelFile: '',
+          sid: 0,
+          speed: 1,
+          numThreads: 2,
+          provider: 'cpu',
+          ...(v.local ?? {})
+        },
+        http: {
+          url: '',
+          method: 'POST',
+          queryTemplate: 'text={text}',
+          headers: {},
+          extraBody: {},
+          ...(v.http ?? {})
+        }
+      };
+    })(),
     slang: {
       enabled: true,
       extractMinMessages: 10,
@@ -465,7 +505,16 @@ function loadConfig() {
       context: {
         recentLimit: 100,
         unreadLimit: 30,
-        contextWindow: 20
+        contextWindow: 20,
+        // 2026-10-25 新增：上下文压缩（滚动换届）
+        // 桥接读不到 DSH 侧的上下文长度，所以自己按「累计字符数」估算：
+        // 超过阈值 → 让 AI 把关键信息写进记忆本 → 换一个干净的 DSH 会话 → 注入前情提要。
+        compactEnabled: true,
+        compactThresholdChars: 80000,   // 累计字符阈值（中文约 4~5 万 token）
+        compactMinTurns: 20,            // 至少这么多条消息才允许压缩，避免新会话就压
+        compactKeepRecent: 6,           // 前情提要里保留最近几条原话
+        compactCooldownMs: 1800000,     // 两次压缩最小间隔（30 分钟）
+        compactMaxPerDay: 8             // 单会话每天最多压缩次数，防抖动
       },
       ...(file.socialV2 ?? {})
     }
@@ -1475,6 +1524,11 @@ async function main() {
   const collectors = new Map(); // sessionId -> turn collector
   const sendToolSucceededSessions = new Set(); // sessionId：当前 turn 内 MCP 发送类工具至少成功一次
   const v2TurnStartAt = new Map(); // sessionId -> timestamp：reserved2 turn 开始时间，用于判断是否“无行动”
+  // 2026-10-25 修复「同一批消息被反复回答」：记录本回合开始时的未读最大 seq。
+  // 回合内只要通过工具成功发过消息，就把 unread 中 seq <= 快照值的条目消费掉（等价于隐式 mark_read）。
+  // 以前只有 AI 主动 qq_mark_read 才清 unread，而补发判定是 `unread 里存在 seq >= 触发点`，
+  // 未读没清 → 判定永远成立 → 积压唤醒被一条条补发 → 每个补发回合 AI 又把同一批消息答一遍。
+  const v2TurnUnreadMaxSeq = new Map(); // sessionId -> 本回合开始时的未读最大 seq
   const toolCallNames = new Map(); // sessionId -> Map<callId, toolName>：用于结果日志关联工具名
   const pendingSendToolCalls = new Map(); // sessionId -> Set<callId>：等待 tool/result 的发送类调用
   // reserved2 防“忘记设置唤醒条件”：key -> 当前是否等待 AI 处理唤醒回合 / 本回合已更新唤醒配置 / 连续未设置次数
@@ -1834,6 +1888,105 @@ async function main() {
     for (const [key, sessionId] of Object.entries(state.sessions)) {
       if (!isCurrentSession(key, sessionId)) retireSession(key);
     }
+  }
+
+  // ── 上下文压缩（2026-10-25）──────────────────────────────────────────────
+  // 为什么这么做：桥接拿不到 DSH 侧会话的上下文长度，DSH 也没有"改写上下文"的接口，
+  // 所以只能做「滚动换届」——累计字符超阈值 → 让 AI 把关键信息写进记忆本 →
+  // retireSession() 换一个干净的 DSH 会话 → 把前情提要注入新会话的第一轮。
+  // 前提：记忆本（activeTopics / pendingThoughts / memberImpressions）存在 social-v2.json，
+  // 与 DSH 会话解耦，换届后不会丢。
+  function buildRecapV2(st) {
+    if (!st) return '';
+    const parts = [];
+    const topics = (Array.isArray(st.activeTopics) ? st.activeTopics : []).filter((t) => t && t.text).slice(-6);
+    if (topics.length) parts.push('之前聊到的：' + topics.map((t) => String(t.text).slice(0, 60)).join('；'));
+    const thoughts = (Array.isArray(st.pendingThoughts) ? st.pendingThoughts : []).filter((t) => t && t.text).slice(-3);
+    if (thoughts.length) parts.push('你还想说的：' + thoughts.map((t) => String(t.text).slice(0, 60)).join('；'));
+    const impObj = st.memberImpressions && typeof st.memberImpressions === 'object' ? st.memberImpressions : {};
+    const imps = Object.entries(impObj).slice(-5);
+    if (imps.length) {
+      parts.push('你记得的人：' + imps.map(([k, v]) => {
+        const nick = String(v?.nick ?? '').trim() || k;
+        const traits = Array.isArray(v?.traits) ? v.traits.slice(0, 3).join('、') : '';
+        return traits ? `${nick}（${traits}）` : nick;
+      }).join('；'));
+    }
+    const keep = Math.max(0, Number(cfg.socialV2?.context?.compactKeepRecent) || 4);
+    // 过滤垃圾消息：纯链接/纯数字/纯表情/太短的（如「888:/火影忍者#...」「唉」「@某人」）留在摘要里没价值。
+    const junkRe = /^[0-9a-zA-Z:\/#=\[\]{}<>+*,._\-~!?@%&|;'"()\s]+$/;
+    const recent = (Array.isArray(st.recentMessages) ? st.recentMessages : [])
+      .filter((m) => m && m.plain)
+      .filter((m) => {
+        const t = String(m.plain).trim();
+        if (t.length < 4) return false;
+        if (/https?:\/\//i.test(t)) return false;
+        if (/复制链接|点击.{0,4}(打开|查看)|戳一戳|分享给你/.test(t)) return false;
+        if (/[A-Z0-9]{6,}/.test(t) && !/[\u4e00-\u9fa5]{4,}/.test(t)) return false;
+        if (junkRe.test(t)) return false;
+        if (/^@\S+$/.test(t)) return false;
+        return true;
+      })
+      .slice(-keep);
+    if (recent.length) {
+      parts.push('最后几句原话：\n' + recent.map((m) => `${m.isSelf ? '你' : (m.sender || '对方')}：${String(m.plain).slice(0, 80)}`).join('\n'));
+    }
+    return parts.join('\n');
+  }
+
+  function maybeScheduleCompactV2(key) {
+    const cc = cfg.socialV2?.context ?? {};
+    if (cc.compactEnabled === false) return;
+    if (currentMode !== 'reserved2' || socialV2.paused) return;
+    if (!isSessionAllowedInCurrentMode(key)) return;
+    const st = getSocialV2State(key);
+    if (st.compactPendingAt) return; // 已经在交接流程里
+    const threshold = Math.max(5000, Number(cc.compactThresholdChars) || 80000);
+    if ((Number(st.contextChars) || 0) < threshold) return;
+    const minTurns = Math.max(0, Number(cc.compactMinTurns) || 20);
+    if ((Number(st.contextMsgCount) || 0) < minTurns) return;
+    const cooldown = Math.max(0, Number(cc.compactCooldownMs) || 1800000);
+    if (st.compactLastAt && Date.now() - Number(st.compactLastAt) < cooldown) return;
+    const maxPerDay = Math.max(1, Number(cc.compactMaxPerDay) || 8);
+    const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+    st.compactTimes = (Array.isArray(st.compactTimes) ? st.compactTimes : []).filter((t) => Number(t) > dayAgo);
+    if (st.compactTimes.length >= maxPerDay) {
+      log(`[reserved2] ${key} 今日已压缩 ${st.compactTimes.length} 次（上限 ${maxPerDay}），跳过`);
+      return;
+    }
+    if (isConversationBusyV2(key, st)) return; // 忙的时候别插队，下个回合再说
+    st.compactPendingAt = Date.now();
+    saveSocialV2State();
+    log(`[reserved2] ${key} 上下文累计约 ${st.contextChars} 字（${st.contextMsgCount} 条），安排交接`);
+    scheduleWakeV2(key, 'compactHandoff');
+  }
+
+  function compactContextV2(key) {
+    const st = getSocialV2State(key);
+    if (!st || !st.compactPendingAt) return;
+    // 保险丝：交接回合里 AI 一条记忆都没写，说明交接失败（它可能直接跳过了），
+    // 那就取消这次压缩 —— 否则会白白丢掉上下文，前情提要还只剩几句垃圾原话。
+    const pendingAt = Number(st.compactPendingAt) || 0;
+    if ((Number(st.memoryWriteAt) || 0) <= pendingAt) {
+      st.compactPendingAt = 0;
+      saveSocialV2State();
+      log(`[reserved2] ${key} 交接回合没有写入任何记忆，取消本次上下文压缩（下个周期再试）`);
+      return;
+    }
+    const recap = buildRecapV2(st);
+    const before = Number(st.contextChars) || 0;
+    const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+    st.contextRecap = recap;
+    st.contextChars = 0;
+    st.contextMsgCount = 0;
+    st.compactPendingAt = 0;
+    st.compactLastAt = Date.now();
+    st.compactCount = (Number(st.compactCount) || 0) + 1;
+    st.compactTimes = [...(Array.isArray(st.compactTimes) ? st.compactTimes : []).filter((t) => Number(t) > dayAgo), Date.now()];
+    saveSocialV2State();
+    retireSession(key);
+    try { appendActivity(`${key} [reserved2] 上下文已压缩：第 ${st.compactCount} 次（原约 ${before} 字）`); } catch {}
+    log(`[reserved2] ${key} 上下文已压缩：第 ${st.compactCount} 次，原约 ${before} 字，前情提要 ${recap.length} 字；旧 DSH 会话已归档`);
   }
 
   let flushingQueue = false;
@@ -5082,17 +5235,24 @@ async function main() {
             if (cleanNewExtra.motivation !== undefined) st.pendingThoughts[idx].motivation = String(cleanNewExtra.motivation).slice(0, 50);
             if (cleanNewExtra.expiresAtMs !== undefined) st.pendingThoughts[idx].expiresAt = Date.now() + Math.max(0, Number(cleanNewExtra.expiresAtMs) || 0);
           } else if (category === 'memberImpression' && st.memberImpressions && typeof st.memberImpressions === 'object') {
-            const oldTarget = target;
-            if (['__proto__', 'constructor', 'prototype'].includes(oldTarget)) { sendJson({ ok: false, error: '非法的群友名字' }, 400); return; }
-            const im = st.memberImpressions[oldTarget] || {};
-            const newTarget = String(cleanNewExtra.target || oldTarget).trim();
-            if (!newTarget || ['__proto__', 'constructor', 'prototype'].includes(newTarget)) { sendJson({ ok: false, error: '非法的群友名字' }, 400); return; }
+            if (['__proto__', 'constructor', 'prototype'].includes(String(target))) { sendJson({ ok: false, error: '非法的群友名字' }, 400); return; }
+            // 2026-10-25：key 走 QQ 号；改昵称只更新 nick，不再搬 key（搬 key 会丢关联）
+            const r = resolveImpressionKeyV2(st, target);
+            const impKey = r.key;
+            if (!impKey) { sendJson({ ok: false, error: '找不到该群友的印象' }, 404); return; }
+            const im = st.memberImpressions[impKey] || {};
             if (newContent !== undefined) {
               im.traits = newContent.split(/[,，、]/).map((s) => s.trim()).filter(Boolean).slice(0, 20);
             }
             if (cleanNewExtra.interactionCount !== undefined) im.interactionCount = Math.max(0, Number(cleanNewExtra.interactionCount) || 0);
-            if (newTarget !== oldTarget) delete st.memberImpressions[oldTarget];
-            st.memberImpressions[newTarget] = im;
+            if (cleanNewExtra.target !== undefined) {
+              const nn = String(cleanNewExtra.target).trim();
+              if (!nn || ['__proto__', 'constructor', 'prototype'].includes(nn)) { sendJson({ ok: false, error: '非法的群友名字' }, 400); return; }
+              im.nick = nn;
+            }
+            if (!im.nick) im.nick = r.nick || String(target);
+            st.memberImpressions[impKey] = im;
+            if (r.nick && r.nick !== impKey) delete st.memberImpressions[r.nick];
           }
           saveSocialV2State();
           sendJson({ ok: true, key, category, memory: formatMemoryV2(st) });
@@ -5144,7 +5304,9 @@ async function main() {
           } else if (category === 'pendingThought' && Array.isArray(st.pendingThoughts)) {
             st.pendingThoughts = st.pendingThoughts.filter((t) => String(t?.text ?? '') !== content);
           } else if (category === 'memberImpression' && st.memberImpressions && typeof st.memberImpressions === 'object') {
-            delete st.memberImpressions[target];
+            // 兼容新旧两种 key：QQ 号 / 昵称 / 调用方原样传的字符串，都删掉
+            const r = resolveImpressionKeyV2(st, target);
+            for (const k of new Set([r.key, r.nick, String(target)].filter(Boolean))) delete st.memberImpressions[k];
           }
           saveSocialV2State();
           sendJson({ ok: true, key, category, memory: formatMemoryV2(st) });
@@ -5804,6 +5966,101 @@ async function main() {
     return body.data;
   }
 
+  // ── 语音回复（可选） ────────────────────────────────────────────────────
+  // 策略在 voice-policy.js（纯函数，好测），引擎在 tts.js（本地 sherpa-onnx / 外部 HTTP）。
+  // 这里只做三件事：判定 → 合成 → 发 record 段。任何一步失败都只降级成文字，不静默。
+  const voiceCfg = cfg.voice || {};
+  const tts = createTts(voiceCfg, { log, rootDir: ROOT });
+  const voiceMemory = createVoiceMemory(path.join(STATE_DIR, 'voice.json'));
+
+  async function sendVoiceRecord(key, wav) {
+    const [kind, id] = key.split(':');
+    const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
+    const params =
+      kind === 'private'
+        ? { user_id: Number(id), message: [{ type: 'record', data: { file: 'base64://' + wav.toString('base64') } }] }
+        : { group_id: Number(id), message: [{ type: 'record', data: { file: 'base64://' + wav.toString('base64') } }] };
+    const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+    const res = await fetch(`${httpUrl}/${action}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
+      },
+      body: JSON.stringify(params),
+      signal: AbortSignal.timeout(SEND_TIMEOUT_MS)
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
+      throw new Error(`语音发送失败：${body.wording || body.retcode || res.status}`);
+    }
+    return body.data;
+  }
+
+  // 先做决策（同步、不发送）。返回 { decision, spoken, replace } 或 null。
+  // replace=true 表示「用语音替代文字」：命中后调用方不要再发同样的文字，避免重复。
+  function planVoice(key, rawText) {
+    if (!voiceCfg.enabled) return null;
+    const maxChars = Number(voiceCfg.maxChars) || 60;
+    // 原文超长：只发文字、不补语音。
+    // toSpeakable 会把长文本截断到 maxChars 再交给 decide，若不先卡原文长度，
+    // 长回复会被截成 60 字念出来；一旦 replaceText 命中还会把原文整段吞掉 → 丢内容。
+    if (String(rawText ?? '').trim().length > maxChars) return null;
+    let spoken;
+    try {
+      spoken = toSpeakable(rawText, { maxChars });
+    } catch (error) {
+      log(`语音清洗异常 (${key})：${error?.message ?? error}`);
+      return null;
+    }
+    if (!hasSpeakableContent(spoken)) return null;
+    const decision = decide({
+      key,
+      text: spoken,
+      cfg: voiceCfg,
+      memory: voiceMemory.data,
+      ownerKey: cfg.ownerQQ ? `private:${cfg.ownerQQ}` : ''
+    });
+    if (!decision.speak) {
+      log(`语音跳过 (${key})：${decision.reason}`);
+      return null;
+    }
+    // decide 只在文本 ≤ maxChars 时才 speak（原文已先卡过长），所以替代不会丢内容；
+    // replaceText=false 时退回「文字+语音」旧行为。
+    const replace = !!voiceCfg.replaceText;
+    return { decision, spoken, replace };
+  }
+
+  // 真正合成 + 经 OneBot 发语音，挂到 sendChain 排队；失败只降级、不静默。
+  function enqueueVoice(key, plan) {
+    const assertSendAllowed = captureSendGuard(key);
+    sendChain = sendChain
+      .then(async () => {
+        assertSendAllowed();
+        const started = Date.now();
+        const audio = await tts.synthesize(plan.decision.text, { timeoutMs: Number(voiceCfg.timeoutMs) || 25000 });
+        await sendVoiceRecord(key, audio.wav);
+        recordSpoken(voiceMemory.data, key);
+        voiceMemory.save();
+        const dur = audio.format === 'wav' ? ((audio.wav.length - 44) / 2 / (audio.sampleRate || 22050)).toFixed(1) : '?';
+        log(`语音已发 (${key}) ${plan.decision.text.length} 字 / ${dur}s 音频 / 合成 ${Date.now() - started}ms${plan.replace ? '（替代文字）' : ''}`);
+        appendActivity(`${key} 发了一条语音：${plan.decision.text.slice(0, 40)}`);
+      })
+      .catch((error) => {
+        // 失败必须出声：主人能从日志和控制台活动里看见，而不是"怎么没声音"。
+        log(`⚠️ 语音未发出 (${key})：${error?.message ?? error}`);
+        appendActivity(`${key} 语音未发出：${String(error?.message ?? error).slice(0, 120)}`);
+      });
+  }
+
+  // 兼容旧行为：文字照发，再追加一条语音（replaceText=false 或无法替代时）。
+  function maybeSendVoice(key, rawText) {
+    const plan = planVoice(key, rawText);
+    if (plan) enqueueVoice(key, plan);
+  }
+
+  if (voiceCfg.enabled) tts.warmup();
+
   // ── 图片/表情字节解析（供一代自动内联与二代按需工具） ────────────────────
   function mimeFromBuffer(buf) {
     if (!buf || buf.length < 12) return 'image/jpeg';
@@ -6186,6 +6443,19 @@ async function main() {
     const [kind, id] = key.split(':');
     const sent = [];
     const failed = [];
+    // 替代模式：单段、短的回复直接发语音，不重复发同一句文字
+    const plan = planVoice(key, messages.join(''));
+    if (plan && plan.replace && messages.length === 1) {
+      enqueueVoice(key, plan);
+      return sendChain.then(() => {
+        if (failed.length > 0) {
+          const err = new Error(`QQ 发送失败 ${failed.length}/${messages.length} 条：${failed[0]?.message ?? '未知错误'}`);
+          err.sent = sent.slice();
+          throw err;
+        }
+        return sent;
+      });
+    }
     for (let i = 0; i < messages.length; i++) {
       const msg = messages[i];
       const useReply = i === 0 ? replyToMessageId : null;
@@ -6211,6 +6481,8 @@ async function main() {
         err.sent = sent.slice();
         throw err;
       }
+      // 二代仿真（reserved2）里 AI 用工具发消息，不经过 sendToQQ；语音挂在这里才接得上。
+      if (sent.length > 0) maybeSendVoice(key, sent.join(''));
       return sent;
     });
   }
@@ -6252,7 +6524,14 @@ async function main() {
       }
       return false;
     }
-    await sendToQQ(key, text);
+    const plan = planVoice(key, text);
+    if (plan && plan.replace) {
+      // 语音替代文字：只发语音，不再发同一句文字（去重）
+      enqueueVoice(key, plan);
+    } else {
+      await sendToQQ(key, text);
+      if (plan) enqueueVoice(key, plan);
+    }
     return true;
   }
 
@@ -6640,6 +6919,14 @@ async function main() {
         preSleepWaitObservedAt: 0,
         preSleepWaitAccumMs: 0,
         lastUnreadSeq: 0,
+        contextChars: 0,
+        contextMsgCount: 0,
+        contextRecap: '',
+        compactPendingAt: 0,
+        compactLastAt: 0,
+        compactCount: 0,
+        compactTimes: [],
+        memoryWriteAt: 0,
         activeTopics: [],
         pendingThoughts: [],
         memberImpressions: {}
@@ -6692,6 +6979,15 @@ async function main() {
             preSleepWaitObservedAt: Number(val.preSleepWaitObservedAt) || 0,
             preSleepWaitAccumMs: Number(val.preSleepWaitAccumMs) || 0,
             lastUnreadSeq: Number(val.lastUnreadSeq) || 0,
+            // 上下文压缩相关（2026-10-25）：必须在这里白名单式加载，否则重启后丢失
+            contextChars: Number(val.contextChars) || 0,
+            contextMsgCount: Number(val.contextMsgCount) || 0,
+            contextRecap: typeof val.contextRecap === 'string' ? val.contextRecap : '',
+            compactPendingAt: Number(val.compactPendingAt) || 0,
+            compactLastAt: Number(val.compactLastAt) || 0,
+            compactCount: Number(val.compactCount) || 0,
+            compactTimes: Array.isArray(val.compactTimes) ? val.compactTimes.map((t) => Number(t)).filter((t) => Number.isFinite(t)) : [],
+            memoryWriteAt: Number(val.memoryWriteAt) || 0,
             activeTopics: Array.isArray(val.activeTopics) ? val.activeTopics : [],
             pendingThoughts: Array.isArray(val.pendingThoughts) ? val.pendingThoughts : [],
             memberImpressions: (() => {
@@ -6764,6 +7060,16 @@ async function main() {
           preSleepWaitObservedAt: st.preSleepWaitObservedAt || 0,
           preSleepWaitAccumMs: st.preSleepWaitAccumMs || 0,
           lastUnreadSeq: st.lastUnreadSeq || 0,
+          // 上下文压缩相关（2026-10-25）：加载与保存都是白名单式，两处都必须列上，
+          // 漏一处就会「重启后计量归零 / 压缩记录丢失」。
+          contextChars: st.contextChars || 0,
+          contextMsgCount: st.contextMsgCount || 0,
+          contextRecap: typeof st.contextRecap === 'string' ? st.contextRecap : '',
+          compactPendingAt: st.compactPendingAt || 0,
+          compactLastAt: st.compactLastAt || 0,
+          compactCount: st.compactCount || 0,
+          compactTimes: Array.isArray(st.compactTimes) ? st.compactTimes.slice(-50) : [],
+          memoryWriteAt: st.memoryWriteAt || 0,
           activeTopics: Array.isArray(st.activeTopics)
             ? st.activeTopics.filter((t) => t && (!t.lastMentionAt || Date.now() - Number(t.lastMentionAt) < 24 * 60 * 60 * 1000)).slice(-50)
             : [],
@@ -6844,6 +7150,36 @@ async function main() {
 
   const IMPRESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // memberImpression 自动衰减：7天未互动即过期
 
+  // 2026-10-25 修复：群友印象原来按「昵称」存 key，改昵称就断、重名会串。
+  // 现在优先落到 QQ 号（userId）上，昵称只存在 value.nick 里做显示。
+  // AI 调用时只知道昵称，所以这里从最近消息里反查 userId；查不到才退回按昵称存（legacy）。
+  function resolveImpressionKeyV2(st, target) {
+    const t = String(target ?? '').trim();
+    if (!t) return { key: '', nick: '' };
+    // 1) 调用方直接给了 QQ 号
+    if (/^\d{5,12}$/.test(t)) {
+      const im = st?.memberImpressions?.[t];
+      return { key: t, nick: String(im?.nick ?? '') };
+    }
+    const recent = Array.isArray(st?.recentMessages) ? st.recentMessages : [];
+    const candidates = recent.filter((m) => m && m.userId && String(m.sender ?? '').trim());
+    // 2) 昵称精确匹配（取最新一条）
+    for (let i = candidates.length - 1; i >= 0; i--) {
+      const m = candidates[i];
+      if (String(m.sender).trim() === t) return { key: String(m.userId), nick: String(m.sender).trim() };
+    }
+    // 3) 包含匹配：群名片常带前后缀（如「小明(摸鱼)」），但限制长度差避免「小」匹配到「小明」
+    for (let i = candidates.length - 1; i >= 0; i--) {
+      const m = candidates[i];
+      const s = String(m.sender).trim();
+      if (!s) continue;
+      const hit = s.includes(t) || t.includes(s);
+      if (hit && Math.abs(s.length - t.length) <= 4) return { key: String(m.userId), nick: s };
+    }
+    // 4) 查不到：退回按昵称存，保持旧行为可用
+    return { key: t, nick: t, legacy: true };
+  }
+
   function formatMemoryV2(st) {
     if (!st) return '';
     const lines = [];
@@ -6871,10 +7207,15 @@ async function main() {
     });
     if (names.length) {
       lines.push('【对群友的印象】');
-      for (const name of names.slice(-6)) {
+      // ⚠️ key 现在是 QQ 号（纯数字字符串），JS 会把整数索引键按数值排序而不是插入顺序，
+      // 所以不能靠 Object.keys 的顺序取"最近 6 个"。这里显式按 lastSeenAt 排。
+      const sortedNames = names.slice().sort((a, b) => (Number(impressions[a]?.lastSeenAt) || 0) - (Number(impressions[b]?.lastSeenAt) || 0));
+      for (const name of sortedNames.slice(-6)) {
         const im = impressions[name] || {};
         const traits = Array.isArray(im.traits) ? im.traits : [];
-        lines.push(`- ${name}：${traits.length ? traits.join('、') : '暂无记录'}（互动 ${Number(im.interactionCount) || 0} 次）`);
+        // key 可能是 QQ 号（新）或昵称（旧数据），显示统一用 nick，没有就退回 key。
+        const label = String(im.nick ?? '').trim() || name;
+        lines.push(`- ${label}：${traits.length ? traits.join('、') : '暂无记录'}（互动 ${Number(im.interactionCount) || 0} 次）`);
       }
     }
     return lines.join('\n');
@@ -6884,6 +7225,8 @@ async function main() {
     if (!st) return;
     const text = redactKnownTokensOnly(String(content ?? '')).trim();
     const cat = String(category || '').trim();
+    // 上下文交接质量检查用：记录最后一次写记忆的时间（见 compactContextV2）
+    if (text) st.memoryWriteAt = Date.now();
     // 轻量清理：过期想法移除；超过 24h 未提起的话题移除（避免无限膨胀）。
     if (Array.isArray(st.pendingThoughts)) {
       st.pendingThoughts = st.pendingThoughts.filter((t) => t && (!t.expiresAt || Date.now() < Number(t.expiresAt)));
@@ -6937,17 +7280,34 @@ async function main() {
           }
         }
       }
-      const target = String(extra.target || '').trim();
-      if (!target || ['__proto__', 'constructor', 'prototype'].includes(target)) return;
+      const rawTarget = String(extra.target || '').trim();
+      if (!rawTarget || ['__proto__', 'constructor', 'prototype'].includes(rawTarget)) return;
       if (!st.memberImpressions || typeof st.memberImpressions !== 'object') st.memberImpressions = {};
-      const old = st.memberImpressions[target] || {};
+      // 2026-10-25：key 优先落到 QQ 号上，昵称只存 nick —— 改昵称不再丢印象，重名也不会串。
+      const resolved = resolveImpressionKeyV2(st, rawTarget);
+      const impKey = resolved.key;
+      if (!impKey || ['__proto__', 'constructor', 'prototype'].includes(impKey)) return;
+      // 旧数据是按昵称存的：这次若能解析出 QQ 号，就把旧记录合并过来再删掉。
+      const legacyKey = (resolved.nick && resolved.nick !== impKey) ? resolved.nick : '';
+      const legacy = legacyKey && st.memberImpressions[legacyKey] && typeof st.memberImpressions[legacyKey] === 'object'
+        ? st.memberImpressions[legacyKey]
+        : null;
+      const old = st.memberImpressions[impKey] || {};
       const traits = Array.isArray(old.traits) ? old.traits.slice(0, 10) : [];
+      if (legacy && Array.isArray(legacy.traits)) {
+        for (const tr of legacy.traits) {
+          const t2 = String(tr ?? '').trim();
+          if (t2 && !traits.includes(t2) && traits.length < 10) traits.push(t2);
+        }
+      }
       if (text && !traits.includes(text.slice(0, 50))) traits.push(text.slice(0, 50));
-      st.memberImpressions[target] = {
-        traits,
-        interactionCount: (Number(old.interactionCount) || 0) + 1,
+      st.memberImpressions[impKey] = {
+        nick: resolved.nick || old.nick || rawTarget,
+        traits: traits.slice(-10),
+        interactionCount: Math.max(Number(old.interactionCount) || 0, Number(legacy?.interactionCount) || 0) + 1,
         lastSeenAt: Date.now()
       };
+      if (legacy && legacyKey !== impKey) delete st.memberImpressions[legacyKey];
       const impressionEntries = Object.entries(st.memberImpressions);
       if (impressionEntries.length > 50) {
         impressionEntries.sort((a, b) => (Number(a[1]?.lastSeenAt) || 0) - (Number(b[1]?.lastSeenAt) || 0));
@@ -7814,6 +8174,9 @@ async function main() {
     if (st.recentMessages.length > recentLimit) st.recentMessages.splice(0, st.recentMessages.length - recentLimit);
     st.unread.push(msg);
     if (st.unread.length > unreadLimit) st.unread.splice(0, st.unread.length - unreadLimit);
+    // 上下文计量：桥接读不到 DSH 侧真实上下文长度，按累计字符估算（对方 + 自己）。
+    st.contextChars = (Number(st.contextChars) || 0) + String(plainContent ?? textContent ?? '').length + 12;
+    st.contextMsgCount = (Number(st.contextMsgCount) || 0) + 1;
     const lowerPlain = String(plainContent ?? textContent ?? '');
     for (const t of st.activeTopics || []) {
       if (!t || typeof t !== 'object') continue;
@@ -7886,6 +8249,11 @@ async function main() {
       });
     }
     if (st.recentMessages.length > recentLimit) st.recentMessages.splice(0, st.recentMessages.length - recentLimit);
+    // 上下文计量：自己说的话也算进去
+    for (const item of list) {
+      st.contextChars = (Number(st.contextChars) || 0) + String(item ?? '').length + 8;
+      st.contextMsgCount = (Number(st.contextMsgCount) || 0) + 1;
+    }
     // AI 实际发言/参与了，说明这轮选择“继续回复”，沉睡前观察状态作废；下次想睡需重新走 5 分钟等待。
     st.preSleepWaitSatisfiedAt = 0;
     st.preSleepWaitObservedAt = 0;
@@ -8041,7 +8409,7 @@ async function main() {
     const tokenLine = `【会话 key】${key}\n【会话令牌】${st.agentToken}（调用二代工具时，key 与令牌必须成对传这一组；**不要猜测 key**，就用这里给的值）\n\n`;
     const memoryText = formatMemoryV2(st);
     const memoryLine = memoryText ? `${memoryText}\n\n` : '';
-    const memoryRulesLine = '【记忆规则】你有一个轻量记忆本（qq_memory_append / qq_memory_query）。以下情况必须写入记忆：①群友提到自己的称呼/生日/所在地/兴趣/重要事件 → memberImpression；②群里正在持续讨论的话题 → activeTopic；③你想到有趣话题但暂时不适合开口 → pendingThought；④有人跟你做了约定或提醒 → pendingThought。每次回复前优先调用 qq_memory_query 查看已有记忆；如果发现有该记但没记的内容，立刻调用 qq_memory_append 补上。记忆写入不要太啰嗦，一句话概括即可。\n\n';
+    const memoryRulesLine = '【记忆规则】你有一个轻量记忆本（qq_memory_append / qq_memory_query）。以下情况必须写入记忆：①群友提到自己的称呼/生日/所在地/兴趣/重要事件 → memberImpression（target 填群友昵称就行，桥接会自动对应到 QQ 号，对方改昵称印象也不会丢）；②群里正在持续讨论的话题 → activeTopic；③你想到有趣话题但暂时不适合开口 → pendingThought；④有人跟你做了约定或提醒 → pendingThought。每次回复前优先调用 qq_memory_query 查看已有记忆；如果发现有该记但没记的内容，立刻调用 qq_memory_append 补上。记忆写入不要太啰嗦，一句话概括即可。\n\n';
     // 注意：黑话表不在这里注入，deliverPromptNow 的 withSlangContext 会统一注入，
     // 避免唤醒 prompt 出现两份黑话表。
     const participationText = formatParticipationV2(st);
@@ -8107,6 +8475,10 @@ async function main() {
     if (reason === 'poke') {
       return `${base}【唤醒】${key}\n原因：有人拍了一拍（可能拍了你，也可能拍了别人）。\n先看未读/最近消息里的 [拍一拍] 事件：如果是拍你，可以自然回应一句，也可以用 qq_send_poke 回一个拍一拍；如果是拍别人，觉得有趣也可以接梗。除了回应，偶尔也可以主动戳一下正在聊的人/熟人，像真人手贱/提醒/逗一下，但别频繁。不想接就安静收尾（qq_mark_read 或 qq_set_wake_config）。`;
     }
+    if (reason === 'compactHandoff') {
+      const chars = Number(st?.contextChars) || 0;
+      return `${base}【上下文整理】${key}\n原因：这个会话已经聊了很久（累计约 ${chars} 字），上下文需要整理一次。\n【这一轮只做交接，不要发言】\n1. 先用 qq_memory_append 把「还没聊完的话题」「跟某人的约定或提醒」「对方透露的重要信息」「你当前的情绪或态度」写进记忆本，一句话一条，最多 5 条；\n2. 不要调用 qq_send_message / qq_reply / qq_send_poke / qq_send_image —— 这一轮你说的话不会发给对方；\n3. 最后调用 qq_mark_read 收尾。\n整理完我会给你换一个干净的上下文，记忆本会保留，所以你该记得的都还记得。`;
+    }
     return `${base}【唤醒】${key}\n原因：${reason}\n【行动前】先判断：群里在聊什么？热闹还是冷清？有没有人直接找你？对方说完了吗？你有没有真正想说的？\n如果群聊正热但没人叫你，可以插一句有趣的/相关的，插不上再看情况潜水；不要一上来就划走。\n【引用：只在必要时用】只有你这条消息指向的人或消息并非最新一条别人的消息，或者你连续的几句话中不同消息指代的是不同的消息或人时，才用 qq_reply 或 qq_send_message 的 replyToMessageId 指向具体那条；其他情况不要引用，别让对方猜。\n你可以调用工具查看未读消息、人设、状态，自行决定是否发言；决定潜水前必须按上面的【沉睡前强制等待】先等够观察窗口。`;
   }
 
@@ -8134,6 +8506,9 @@ async function main() {
       '这轮如果合适，只回个语气词或者发个表情就够。',
       '这轮允许不完美：说错了就改口（“不对，我刚说错了”），别硬圆回来。',
       '这轮别总结、别每句带语气词，自然一点。',
+      '这轮可以手滑一下：偶尔打错一个字也没事，不用每句都完美。',
+      '这轮说话别太利索：可以有半句、想一下再补一句。',
+      '这轮容易被新话题勾走：聊到有意思的梗就顺着跳过去，不用硬回到原来的话。',
     ],
     proactiveCheck: [
       '想主动说点什么，可以说一句你刚在干嘛（看【你最近自己做过的事】）。',
@@ -8160,8 +8535,20 @@ async function main() {
   /** 对外入口：核心提示词 + 末尾追加"我最近自己做过的事"（末尾是为了不破坏缓存前缀）。 */
   function buildWakePromptV2(key, reason) {
     const baseReason = String(reason ?? '').split(':')[0];
+    // 上下文压缩后的第一轮：把前情提要注入一次，注入后立刻清掉（避免长期占 token）。
+    let recapLine = '';
+    try {
+      const stR = getSocialV2State(key);
+      if (stR?.contextRecap) {
+        recapLine = `\n【前情提要】上下文刚整理过，细节都在记忆本里。这是你该记得的：\n${stR.contextRecap}\n`;
+        stR.contextRecap = '';
+        saveSocialV2State();
+      }
+    } catch (error) {
+      log(`[reserved2] 前情提要注入失败 ${key}: ${error?.message ?? error}`);
+    }
     return buildWakePromptV2Core(key, reason) + recentActionsLine() + topicBiasLine()
-      + styleNudgeV2(reason)
+      + styleNudgeV2(reason) + recapLine
       + (baseReason === 'proactiveCheck' ? proactiveShareSeed() : '');
   }
 
@@ -8171,7 +8558,7 @@ async function main() {
     const st = getSocialV2State(key);
     const tokenLine = `【会话 key】${key}\n【会话令牌】${st.agentToken}（调用二代工具时，key 与令牌必须成对传这一组；**不要猜测 key**，就用这里给的值）\n\n`;
     const preSleepMs = Math.max(0, Number(cfg.socialV2?.wake?.preSleepWaitMs) || 300000);
-    return `${roleLine}${tokenLine}【提醒】你还没有完成回合收尾。请调用 qq_set_wake_config 设置下一次唤醒条件（例如继续潜水多久、@/名字/关键词/提问/概率/指定成员等），或者调用 qq_mark_read 表示你看过且决定不接。这是为了防止你忘记收尾后进入“永眠”。注意：设置潜水前先用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 完成沉睡前观察；等待期间有人说话时查看 newMessages，判断不需要你参与即可收尾。【重要例外】如果 QQ 工具因为网关/桥接不可达而全部失败（fetch failed），那么本回合的收尾要求自动豁免：不要反复重试，直接结束回合即可——网关恢复后你会被重新唤醒，届时再收尾。${recentActionsLine()}`;
+    return `${roleLine}${tokenLine}【提醒】你还没有完成回合收尾。请调用 qq_set_wake_config 设置下一次唤醒条件（例如继续潜水多久、@/名字/关键词/提问/概率/指定成员等），或者调用 qq_mark_read 表示你看过且决定不接。这是为了防止你忘记收尾后进入“永眠”。【本回合禁止发言】这是一个纯收尾提醒，不是聊天回合：不要调用 qq_send_message / qq_reply / qq_send_poke / qq_send_image 等任何发送类工具，也不要输出要发给对方的话。你刚才那一轮已经说过了，再补一句就是重复。注意：设置潜水前先用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 完成沉睡前观察；等待期间有人说话时查看 newMessages，判断不需要你参与即可收尾。【重要例外】如果 QQ 工具因为网关/桥接不可达而全部失败（fetch failed），那么本回合的收尾要求自动豁免：不要反复重试，直接结束回合即可——网关恢复后你会被重新唤醒，届时再收尾。${recentActionsLine()}`;
   }
 
   async function sendWakePromptV2(key, reason) {
@@ -8332,13 +8719,40 @@ async function main() {
     anyMessage: 50,
     replyCheck: 40,
     timeout: 30,
-    proactiveCheck: 20
+    proactiveCheck: 20,
+    compactHandoff: 15
   };
 
   // 唤醒原因可能带子类型（如 keyword:小鲸鱼、speaker:昵称），取冒号前的基名计算优先级。
   function wakePriorityV2(reason) {
     const base = String(reason ?? '').split(':')[0];
     return WAKE_PRIORITY[base] ?? 0;
+  }
+
+  // 2026-10-25 借鉴 MaiBot 的 message_debounce_mode（natural 档）：
+  // 固定 8 秒窗口的问题是「被 @ 了也要干等 8 秒」，而热聊时又攒不住。
+  // 这里按气氛动态算窗口（仍以 wakeConfig.batchWindowMs 为上限）：
+  //   @ / 叫名字 / 提问 → 1.2 秒（对方在等你，立刻回）
+  //   拍一拍           → 2 秒
+  //   冷场后第一条     → 2 秒（别让人等）
+  //   正在热聊         → 5 秒（等对方把话说完，别抢话）
+  //   同一个人连发     → 最多 2.5 秒（他还没说完）
+  //   换人接话         → 0.7 秒（话题转了，可以接）
+  function computeBatchWindowV2(st, reason, fallbackMs) {
+    const cap = Math.max(1000, Number(fallbackMs) || 8000);
+    const base = String(reason ?? '').split(':')[0];
+    if (base === 'at' || base === 'nameMention' || base === 'question') return Math.min(cap, 1200);
+    if (base === 'poke') return Math.min(cap, 2000);
+    const unread = Array.isArray(st.unread) ? st.unread : [];
+    if (unread.length < 1) return cap;
+    const last = unread[unread.length - 1];
+    const prev = unread[unread.length - 2];
+    const quietMs = st.lastIncomingAt ? Date.now() - st.lastIncomingAt : 60000;
+    let ms = quietMs > 30000 ? 2000 : 5000;
+    if (prev && last && last.userId && prev.userId) {
+      ms = last.userId === prev.userId ? Math.min(ms, 2500) : 700;
+    }
+    return Math.max(700, Math.min(cap, ms));
   }
 
   function scheduleWakeV2(key, reason) {
@@ -8375,14 +8789,15 @@ async function main() {
       st.sleepTimer = null;
     }
     st.pendingWakeReason = reason;
-    const batchMs = Math.max(1000, Number(st.wakeConfig?.batchWindowMs) || 8000);
+    const capMs = Math.max(1000, Number(st.wakeConfig?.batchWindowMs) || 8000);
+    const batchMs = computeBatchWindowV2(st, reason, capMs);
     st.pendingWakeTimer = setTimeout(() => {
       st.pendingWakeTimer = null;
       const finalReason = st.pendingWakeReason || reason;
       st.pendingWakeReason = null;
       void sendWakePromptV2(key, finalReason).catch((error) => log(`[reserved2] 计划唤醒异常 ${key}:`, error?.message ?? error));
     }, batchMs);
-    log(`[reserved2] 计划唤醒 ${key}（${reason}），${Math.round(batchMs / 1000)}s 后发送`);
+    log(`[reserved2] 计划唤醒 ${key}（${reason}），${(batchMs / 1000).toFixed(1)}s 后发送`);
   }
 
   function setupSleepTimerV2(key) {
@@ -9869,6 +10284,36 @@ ${stickerMenu ? `\n${stickerMenu}\n` : ''}
         }
         return;
       }
+      if (plainContent === '/compact') {
+        const stC = getSocialV2State(key);
+        if (!state.sessions[key]) {
+          await sendToQQ(key, '这个会话还没有上下文，不用整理。');
+          return;
+        }
+        if (stC.compactPendingAt) {
+          await sendToQQ(key, '已经在整理中了，等这一轮交接完就会换新上下文。');
+          return;
+        }
+        stC.compactPendingAt = Date.now();
+        saveSocialV2State();
+        await sendToQQ(key, `开始整理上下文（累计约 ${Number(stC.contextChars) || 0} 字）…整理完会自动换新上下文，记忆本会保留。`);
+        scheduleWakeV2(key, 'compactHandoff');
+        return;
+      }
+      if (plainContent === '/context') {
+        const stC = getSocialV2State(key);
+        const cc = cfg.socialV2?.context ?? {};
+        const threshold = Math.max(5000, Number(cc.compactThresholdChars) || 80000);
+        const pct = Math.min(100, Math.round(((Number(stC.contextChars) || 0) / threshold) * 100));
+        const lastAt = Number(stC.compactLastAt) || 0;
+        await sendToQQ(key, [
+          `会话 ${state.sessions[key] ?? '未创建'}`,
+          `累计约 ${Number(stC.contextChars) || 0} 字 / ${Number(stC.contextMsgCount) || 0} 条（阈值 ${threshold}，已用 ${pct}%）`,
+          `已压缩 ${Number(stC.compactCount) || 0} 次${lastAt ? `，上次 ${new Date(lastAt).toLocaleString()}` : ''}`,
+          stC.compactPendingAt ? '当前正在整理中' : '当前未在整理'
+        ].join('\n'));
+        return;
+      }
       if (plainContent === '/status') {
         const rs = readRoleState();
         await sendToQQ(key, `会话 ${state.sessions[key] ?? '未创建'}；白名单 ${allowed(kind, id, cfg) ? '通过' : '拦截'}；角色 ${rs.role ?? '无'}；模式 ${rs.mode}`);
@@ -10340,6 +10785,14 @@ ${stickerMenu ? `\n${stickerMenu}\n` : ''}
               sendToolSucceededSessions.delete(frame.sessionId);
               pendingSendToolCalls.delete(frame.sessionId);
               v2TurnStartAt.set(frame.sessionId, Date.now());
+              // 记录本回合开始时的未读最大 seq，回合结束时用于自动消费（见 turn/end 分支）。
+              try {
+                const stSnap = getSocialV2State(key);
+                const unreadSnap = Array.isArray(stSnap.unread) ? stSnap.unread : [];
+                const snapMax = unreadSnap.reduce((mx, m) => Math.max(mx, Number(m?.seq) || 0), 0);
+                if (snapMax > 0) v2TurnUnreadMaxSeq.set(frame.sessionId, snapMax);
+                else v2TurnUnreadMaxSeq.delete(frame.sessionId);
+              } catch { v2TurnUnreadMaxSeq.delete(frame.sessionId); }
               armTurnLease(reverse.get(frame.sessionId));
               // 2026-09-30 修复：收集器**只在 turn/start 时重建**。
               // 旧写法是在下面“任何会话事件”都 `?? createTurnCollector()`，于是被控制台暂停 /
@@ -10403,6 +10856,20 @@ ${stickerMenu ? `\n${stickerMenu}\n` : ''}
             const collector = collectors.get(frame.sessionId);
             const ended = collector ? collector.push(frame.event) : null;
             if (ended) {
+              // 上下文压缩（2026-10-25）：本回合若是交接回合 → 立刻换届；
+              // 否则回合结束后 3 秒异步检查一次是否该压缩（不阻塞本回合收尾流程）。
+              if (key) {
+                try {
+                  const stC = getSocialV2State(key);
+                  if (stC.compactPendingAt && stC.lastWakeReason === 'compactHandoff') compactContextV2(key);
+                } catch (error) {
+                  log(`[reserved2] 上下文交接执行异常 ${key}: ${error?.message ?? error}`);
+                }
+                setTimeout(() => {
+                  try { maybeScheduleCompactV2(key); }
+                  catch (error) { log(`[reserved2] 上下文压缩检查异常 ${key}: ${error?.message ?? error}`); }
+                }, 3000).unref?.();
+              }
               // reserved2 无行动兜底：普通唤醒回合若既没发消息、也没 mark_read / set_wake_config，
               // 则累计 noActionCount；达到阈值后自动重置 WakeConfig，避免 AI 卡死。
               const silentQueueNow = social.silentTurns.get(frame.sessionId) ?? [];
@@ -10430,6 +10897,27 @@ ${stickerMenu ? `\n${stickerMenu}\n` : ''}
               disarmTurnLease(reverse.get(frame.sessionId));
               const sendToolSucceeded = sendToolSucceededSessions.has(frame.sessionId);
               sendToolSucceededSessions.delete(frame.sessionId);
+              // 2026-10-25 修复：本回合已通过工具成功发言 → 视为已处理本回合开始时的那批未读。
+              // 目的：让下面“补发积压唤醒”的 stillRelevant 判定真正生效，不再把同一批消息反复唤醒、反复回答。
+              if (sendToolSucceeded) {
+                const snapMax = v2TurnUnreadMaxSeq.get(frame.sessionId) ?? 0;
+                if (snapMax > 0) {
+                  try {
+                    const stU = getSocialV2State(key);
+                    const beforeCount = Array.isArray(stU.unread) ? stU.unread.length : 0;
+                    if (beforeCount > 0) {
+                      stU.unread = stU.unread.filter((m) => (Number(m?.seq) || 0) > snapMax);
+                      if (stU.unread.length !== beforeCount) {
+                        saveSocialV2State();
+                        log(`[reserved2] ${key} 本回合已发言，自动消费 ${beforeCount - stU.unread.length} 条未读（seq<=${snapMax}）`);
+                      }
+                    }
+                  } catch (error) {
+                    log(`[reserved2] ${key} 自动消费未读失败: ${error?.message ?? error}`);
+                  }
+                }
+              }
+              v2TurnUnreadMaxSeq.delete(frame.sessionId);
               pendingSendToolCalls.delete(frame.sessionId);
               toolCallNames.delete(frame.sessionId);
               // 标记本次 turn 是否为“活跃超时退场”发言（用于准确回到观望，避免把旧回复误判为退场）
@@ -10492,9 +10980,18 @@ ${stickerMenu ? `\n${stickerMenu}\n` : ''}
                   if (!item || typeof item !== 'object') {
                     // 兼容旧字符串残留
                   } else {
-                    const stillRelevant = Array.isArray(stEnd.unread) && stEnd.unread.some((m) => m && Number(m.seq) >= Number(item.seq));
+                    // 2026-10-25 修复：原来用 `seq >= item.seq`，而未读常常没被清空（AI 不一定调 qq_mark_read），
+                    // 这个判定就永远成立，积压的唤醒被一条条补发，每个补发回合都把同一批消息再答一遍。
+                    // 现在只有「比触发点更新的消息」才算仍然相关。
+                    const stillRelevant = Array.isArray(stEnd.unread) && stEnd.unread.some((m) => m && Number(m.seq) > Number(item.seq));
                     if (stillRelevant) {
-                      log(`[reserved2] ${key} 补发繁忙期间积压的唤醒：${item.reason}@seq${item.seq}`);
+                      // 同一批未读只需要一次唤醒：剩下的积压一起清掉，避免连环补发。
+                      const dropped = stEnd.pendingWakeReasons.length;
+                      if (dropped > 0) {
+                        stEnd.pendingWakeReasons = [];
+                        saveSocialV2State();
+                      }
+                      log(`[reserved2] ${key} 补发繁忙期间积压的唤醒：${item.reason}@seq${item.seq}${dropped > 0 ? `（同时清掉 ${dropped} 条重复积压）` : ''}`);
                       scheduleWakeV2(key, item.reason);
                     } else {
                       log(`[reserved2] ${key} 繁忙期间唤醒 ${item.reason}@seq${item.seq} 已被当前回合处理，跳过补发`);
@@ -10585,10 +11082,17 @@ ${stickerMenu ? `\n${stickerMenu}\n` : ''}
                   const messages = timeline.main;
                   log(`agent 回复 (${key}) ${plain.length} 字 → ${messages.length} 条`);
                   appendActivity(`${key} agent 回复：${messages[0].slice(0, 80)}${messages.length > 1 ? '（分' + messages.length + '条）' : ''}${messages[0].length > 80 ? '…' : ''}`);
-                  if (messages.length > 1) {
-                    await sendBurstToQQ(key, messages, cfg.social);
+                  // 仿真模式也允许偶尔发一条语音：单条、短、有情绪时，用语音替代文字（不重复）
+                  const voicePlan = !isFarewell ? planVoice(key, messages.join('')) : null;
+                  if (voicePlan && voicePlan.replace && messages.length === 1) {
+                    enqueueVoice(key, voicePlan);
                   } else {
-                    await sendToQQ(key, messages[0]);
+                    if (messages.length > 1) {
+                      await sendBurstToQQ(key, messages, cfg.social);
+                    } else {
+                      await sendToQQ(key, messages[0]);
+                    }
+                    if (voicePlan) enqueueVoice(key, voicePlan);
                   }
                   // 发言后刷新活跃时间，并调度可能的二次补刀
                   const st = socialState(key);

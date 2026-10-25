@@ -109,6 +109,28 @@ npm install        # 安装依赖（postinstall 会自动修补 @snowluma/sdk �
 
 > ⚠️ `allowAllWhenEmpty: true` 表示「白名单没填就全部放行」——把 agent 接入 QQ 等于把账号控制权交给了模型，建议先填白名单。
 
+### 语音回复（可选）
+
+桥接可以给文字回复**额外补一条语音**，让鲸鲸用声音回你。本地推理，**不联网、不依赖 Edge TTS**（微软 2026-10-23 起已全局掐掉第三方 Edge TTS）。
+
+- **引擎**：`sherpa-onnx-node` + Piper 中文模型 `vits-piper-zh_CN-xiao_ya-medium-int8`（已放在 `models/` 下，约 20MB，纯 CPU，本机 i5-6400 实测约 1.6x 实时）。
+- **开启**：`config.json` 里 `voice.enabled = true`，`voice.scope` 选范围：
+  - `off` 关闭；`owner` 只对 `ownerQQ` 本人；`private` 对所有私聊；`all` 私聊+群。
+- **策略**（`src/voice-policy.js`，纯函数好测）：短句 + 情绪浓的回复更容易补语音；受 `maxChars`/`minChars` 长度门控、`cooldownMs` 同会话冷却、`hourlyCapPerConv`/`dailyCap` 配额、`quietHours` 静音时段约束。判定是概率性的，不是每条都发。
+- **去重（关键）**：`voice.replaceText`（默认 `true`）开启时，会发语音的那条回复就**不再发同样的文字**——你只收到语音、不重复收文字。设 `false` 才退回「文字 + 语音」双发（旧行为）。因为语音只在短句（≤ `maxChars`）时触发，替代不会丢长内容。
+- **文本清洗**（`src/tts-text.js`）：去掉 Markdown 记号、代码块、链接地址、括号里的动作提示（如「（小声）」），数字转中文读法，避免念出奇怪内容。
+- **失败不静默**：合成或发送任一步出错，只降级成纯文字，并在日志 + 控制台活动里明确报「语音未发出」及原因。
+
+快速验证（不依赖真实聊天）：
+
+```bash
+node scripts/test-voice-policy.mjs   # 策略单测
+node scripts/say.mjs "想试听的一句话"  # 直接给 ownerQQ 发一条语音
+node scripts/test-voice-e2e.mjs      # 复刻生产 maybeSendVoice 全链路，真实发一条到 QQ
+```
+
+> 想换声音/换引擎（如接外部 TTS 服务），改 `voice.engine` 与 `voice.local` / `voice.http` 段，详见 `config.example.json` 的 `voice` 模板。
+
 ### DSH 端安装（必做：装 preset + 挂 MCP）
 
 桥接和控制台能跑起来还不够，DSH 端还需要安装两个聊天 preset（`qq-chat` / `qq-chat-v2`）并挂载 MCP。**单机新装同样必须执行这一步**（不是只有「另一台设备」才需要），装完还要**重启 DSH**：

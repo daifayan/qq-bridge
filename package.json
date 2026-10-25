@@ -41,6 +41,8 @@
     "@snowluma/mcp": "^1.14.10",
     "@snowluma/sdk": "^1.14.0",
     "js-yaml": "^4.3.2",
+    "sherpa-onnx-node": "^2.0.0",
+    "ws": "8.22.0",
     "zod": "^4.4.3"
   }
 }
