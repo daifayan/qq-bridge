@@ -9,10 +9,19 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
-    name: syntax + audit suite
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,23 +36,37 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Syntax-check every source file. `node --check` only parses, so it is
-      # cheap and independent of the audit suite below.
+      # Cross-platform syntax check for every tracked src/ and scripts/ JS/MJS file.
       - name: Syntax check
-        shell: bash
-        run: |
-          fail=0
-          while IFS= read -r f; do
-            if node --check "$f" 2>/dev/null; then
-              :
-            else
-              echo "::error file=$f::syntax error"
-              fail=1
-            fi
-          done < <(find src scripts -type f \( -name '*.js' -o -name '*.mjs' \) | sort)
-          exit $fail
+        run: npm run check:syntax
+
+      # .bat/.cmd must stay pure ASCII; Windows cmd parses them byte-wise.
+      - name: Launcher encoding audit
+        run: npm run audit:launchers
 
       # Offline audit suite: fixtures and mocks only (QQ_BRIDGE_TEST_LIVE=0),
-      # no live DSH / OneBot / QQ needed. Runs the same 10 scripts as local.
+      # no live DSH / OneBot / QQ needed.
       - name: Audit suite
         run: npm run test:audit
+
+  security:
+    name: security
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      # High-confidence credential scan over tracked files only.
+      - name: Secret scan
+        run: node scripts/secret-scan.mjs
+
+      # Production dependencies only; fail on high or critical advisories.
+      - name: Dependency audit
+        run: npm audit --omit=dev --audit-level=high

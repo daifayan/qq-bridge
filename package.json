@@ -9,6 +9,10 @@
   },
   "scripts": {
     "start": "node src/bridge.js",
+    "check:syntax": "node scripts/check-syntax.mjs",
+    "secret:scan": "node scripts/secret-scan.mjs",
+    "audit:launchers": "node scripts/audit-launchers.mjs",
+    "review:preflight": "npm run check:syntax && npm run secret:scan && npm run audit:launchers && npm run test:audit && npm audit --omit=dev --audit-level=high",
     "test:audit": "node scripts/test-audit.mjs",
     "self-test": "node src/self-test.js",
     "test-md": "node scripts/test-md-to-plain.mjs",

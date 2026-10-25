@@ -6,10 +6,10 @@ rem ============================================================
 rem  DeepSeek Suite one-click start (PUBLIC TEMPLATE)
 rem    DSH(3080) + SnowLuma(5099/3000/3001) + QQ-Bridge(3100)
 rem
-rem  This is the sanitized template of 启动全家桶.bat. The real file
-rem  is git-ignored because it embeds the bot's QQ number and OneBot
+rem  This is the sanitized template of the local suite launcher. The real
+rem  file is git-ignored because it embeds the bot's QQ number and OneBot
 rem  accessToken. To use this template:
-rem    1. copy it to 启动全家桶.bat
+rem    1. copy it to your local suite launcher filename
 rem    2. copy paths.bat.example to paths.bat and fill your paths
 rem    3. set BOTUIN / BOTTOKEN below (values from your config.json:
 rem       the bot QQ number and snowluma.accessToken)

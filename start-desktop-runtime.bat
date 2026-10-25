@@ -1,5 +1,22 @@
 @echo off
-rem 启动桌面端 DSH runtime（端口 43129），DSH_HOME 指向 dsh-desktop 的 harness。
-rem 桥接（config.json baseUrl=http://127.0.0.1:43129）启动顺序：先本脚本，再启动桥接。
-cd /d F:\ai\qq-bridge
-"C:\Users\hzm10\AppData\Local\Doubao\User Data\sandbox_runtime\bases\c98c5042338ed152c6f10ecd8591889f\node\node.exe" start-desktop-runtime.mjs
+rem Start the DSH Desktop runtime on port 43129.
+rem DSH_HOME points at the dsh-desktop harness profile.
+rem Keep this file PURE ASCII: cmd reads .bat byte-wise.
+
+setlocal
+cd /d "%~dp0"
+if exist "%~dp0paths.bat" call "%~dp0paths.bat"
+
+set "NODE_EXE="
+if defined NODE if exist "%NODE%" set "NODE_EXE=%NODE%"
+if not defined NODE_EXE (
+  where node >nul 2>&1
+  if not errorlevel 1 set "NODE_EXE=node"
+)
+if not defined NODE_EXE (
+  echo [ERROR] node.exe not found. Set NODE in paths.bat or install Node.js.
+  pause
+  exit /b 1
+)
+
+"%NODE_EXE%" "%~dp0start-desktop-runtime.mjs"
