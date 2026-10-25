@@ -18,6 +18,7 @@ set "HERE=%~dp0"
 if exist "%HERE%paths.bat" call "%HERE%paths.bat"
 if not defined BRIDGEDIR set "BRIDGEDIR=%HERE%"
 if not defined SNOWDIR set "SNOWDIR=%HERE%..\SnowLuma"
+if not defined DSHEXE set "DSHEXE=D:\dsh\DSH Desktop\DSH Desktop.exe"
 
 echo ============================================================
 echo    Desktop Suite - One-Click Start
@@ -27,16 +28,31 @@ echo.
 echo    QQ must be running and logged in: SnowLuma attaches to QQ.
 echo.
 
-REM ---- 1) Desktop DSH runtime (43129) ---------------------------
-netstat -ano | findstr ":43129 " | findstr "LISTENING" >nul 2>&1
+REM ---- 1) DSH Desktop app (prefers 43129) -----------------------
+tasklist /FI "IMAGENAME eq DSH Desktop.exe" 2>nul | findstr /I "DSH Desktop.exe" >nul
 if !errorlevel!==0 (
-  echo [1/3] Desktop DSH : already running on 43129 - skipped
+  echo [1/3] DSH Desktop : already running - skipped
+  netstat -ano | findstr ":43129 " | findstr "LISTENING" >nul 2>&1
+  if !errorlevel! neq 0 (
+    echo       [WARN] DSH Desktop is running but 43129 is not listening.
+    echo              It may be on a temporary port. Close DSH Desktop and run this again.
+  )
 ) else (
-  echo [1/3] Desktop DSH : starting... a console window will stay open
-  if exist "%BRIDGEDIR%\start-desktop-runtime.bat" (
-    start "DSH Desktop Runtime" "%BRIDGEDIR%\start-desktop-runtime.bat"
+  netstat -ano | findstr ":43129 " | findstr "LISTENING" >nul 2>&1
+  if !errorlevel!==0 (
+    echo [1/3] DSH Desktop : port 43129 is already in use - desktop app not started.
+    echo       Close the process using 43129, then run this again.
+    echo       Starting the desktop app now would put it on a temporary port.
   ) else (
-    echo       [ERROR] start-desktop-runtime.bat missing in %BRIDGEDIR%
+    if exist "%DSHEXE%" (
+      echo [1/3] DSH Desktop : starting desktop app...
+      start "" "%DSHEXE%"
+    ) else if exist "%BRIDGEDIR%\start-desktop-runtime.bat" (
+      echo [1/3] DSH Desktop : executable not found, using CLI runtime fallback...
+      start "DSH Desktop Runtime" "%BRIDGEDIR%\start-desktop-runtime.bat"
+    ) else (
+      echo       [ERROR] neither DSH Desktop nor start-desktop-runtime.bat found
+    )
   )
 )
 
@@ -97,10 +113,15 @@ echo.
 echo ============================================================
 echo    Done.
 echo ============================================================
-timeout /t 6 /nobreak >nul
-start "" "http://127.0.0.1:3100/"
+ping -n 7 127.0.0.1 >nul 2>&1
+REM Open the console with its current token; the bare root URL returns 401.
+if defined NODE if exist "F:\ai\tools\bridge-open.mjs" (
+  start "QQ Bridge Console" /min "%NODE%" "F:\ai\tools\bridge-open.mjs"
+) else (
+  start "" "http://127.0.0.1:3100/"
+)
 
-echo    Desktop runtime  43129  (console window stays open)
+echo    DSH Desktop      43129  (desktop app + web page share it)
 echo    QQ-Bridge console  http://127.0.0.1:3100/
 echo    SnowLuma WebUI     http://127.0.0.1:5099/
 echo.
