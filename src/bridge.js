@@ -18,6 +18,7 @@ import { SENSITIVE_RE } from './sensitive.js';
 import { looksLikeUnfinished } from './v2-wait.js';
 import { safeFetchBuffer, looksLikeImageBuffer } from './safe-fetch.js';
 import { createApiAdapter } from './api-adapt.js';
+import { createVideoStoryboard } from './video-storyboard.js';
 import { createTts } from './tts.js';
 import { toSpeakable, hasSpeakableContent } from './tts-text.js';
 import { decide, recordSpoken, createVoiceMemory } from './voice-policy.js';
@@ -820,6 +821,15 @@ function extractMediaFromSegments(segments) {
       media.push({
         kind: 'face',
         faceId: String(d.id ?? '')
+      });
+    } else if (seg.type === 'video') {
+      // 视频只记定位信息，字节等到真要"看"的时候才下（见 resolveMediaList）。
+      media.push({
+        kind: 'video',
+        file: String(d.file ?? ''),
+        url: String(d.url ?? ''),
+        duration: Number(d.duration ?? 0) || 0,
+        size: Number(d.file_size ?? d.fileSize ?? 0) || 0
       });
     }
   }
@@ -6271,10 +6281,37 @@ async function main() {
     return { text: `[表情#${media.faceId}]` };
   }
 
+  // 视频 → 分镜图 + 时间码清单。失败就退化成一行说明，绝不让整条消息丢掉。
+  async function resolveVideoParts(media, index) {
+    if (!videoStoryboard.available()) {
+      return { bytes: 0, parts: [{ type: 'text', text: `[视频${index}（这台机器还没装视频分镜，看不到内容）]` }] };
+    }
+    const url = String(media.url ?? '').trim();
+    if (!/^https?:\/\//i.test(url)) {
+      return { bytes: 0, parts: [{ type: 'text', text: `[视频${index}（拿不到可下载的地址，看不到内容）]` }] };
+    }
+    try {
+      const result = await videoStoryboard.run({ url, tag: media.file || url });
+      const parts = [
+        { type: 'text', text: `[视频${index}] 下面是按时间顺序的分格清单，每格带起止时间；先读清单，需要细节再对照图片。` },
+        { type: 'image', mediaType: 'image/png', data: result.pngBuffer.toString('base64'), name: `qq-video-${index}.png` }
+      ];
+      if (result.text) parts.push({ type: 'text', text: result.text });
+      return { bytes: result.pngBuffer.length, parts };
+    } catch (error) {
+      log(`视频分镜失败 (${index}): ${error?.message ?? error}`);
+      return {
+        bytes: 0,
+        parts: [{ type: 'text', text: `[视频${index}（解析失败：${String(error?.message ?? error).slice(0, 100)}）]` }]
+      };
+    }
+  }
+
   async function resolveMediaList(mediaList) {
     const parts = [];
     let index = 0;
     let totalBytes = 0;
+    let videoCount = 0;
     for (const media of Array.isArray(mediaList) ? mediaList : []) {
       index += 1;
       if (index > MAX_MEDIA_COUNT) {
@@ -6282,7 +6319,17 @@ async function main() {
         continue;
       }
       if (!media || typeof media !== 'object') continue;
-      if (media.kind === 'face') {
+      if (media.kind === 'video') {
+        // 一条消息只解析第一个视频：下载 + 抽帧都是重活，连发三个视频能把回复拖成几分钟。
+        videoCount += 1;
+        if (videoCount > 1) {
+          parts.push({ type: 'text', text: `[视频${index}（单条消息只解析第一个视频，已跳过）]` });
+          continue;
+        }
+        const videoParts = await resolveVideoParts(media, index);
+        totalBytes += videoParts.bytes;
+        parts.push(...videoParts.parts);
+      } else if (media.kind === 'face') {
         const face = await fetchFaceMedia(media);
         if (face.buffer) {
           if (totalBytes + face.buffer.length > MAX_MEDIA_BYTES) {
@@ -6552,6 +6599,9 @@ async function main() {
       reasoningEffort: String(cfg.dsh?.reasoningEffort || 'max')
     })
   });
+  // 视频分镜：收到视频时把 url 落盘、跑 dsh-video-storyboard，产出宫格图 + 时间码清单。
+  // 关掉它就退回老行为（只显示 `[视频]` 占位）。
+  const videoStoryboard = createVideoStoryboard({ cfg, log, stateDir: STATE_DIR });
   // 只有"看起来像上游/鉴权/额度问题"的报错才触发换 provider，
   // 避免因为无关的业务错误把模型来回切。
   // reasoning_content 也归到这一类：换模型后旧历史缺思考链，这类模型会直接拒（2026-10-17 实测 beam-free）。
