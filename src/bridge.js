@@ -4611,6 +4611,17 @@ async function main() {
           // 先做发送频率检查并预占额度，再解析引用目标，避免未限流的引用查询打爆 OneBot。
           const st = getSocialV2State(key);
           const now = Date.now();
+          // 刚用 qq_send_voice 说过同一句话？拒掉这条文字。
+          // 2026-10-31：模型有时会"发语音 + 再补一遍文字"，用户会同时收到两份。
+          if (st.lastVoiceAt && now - st.lastVoiceAt < 60000 && st.lastVoiceText) {
+            const normalize = (s) => String(s ?? '').replace(/[\s，。！？、,.!?~～…—－-]/g, '');
+            const voiceText = normalize(st.lastVoiceText);
+            const messageText = normalize(messages.join(''));
+            if (voiceText && messageText && (voiceText === messageText || voiceText.includes(messageText) || messageText.includes(voiceText))) {
+              sendJson({ ok: false, error: '你刚用语音说过这句了，不用再发一遍文字。要说别的就换个说法。' }, 409);
+              return;
+            }
+          }
           const maxPerMinute = Number(sendCfg.maxSendPerMinute) || 0;
           const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
           const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
@@ -4652,7 +4663,9 @@ async function main() {
             const burstHint = messages.length >= 3 ? '你已经连发了多条，确认是必要的吗？真人很少一口气补完。' : undefined;
             const spaceWarn = findCjkSpaceWarning(messages);
             const splitWarn = findSplitBoundaryWarning(messages);
-            sendJson({ ok: true, key, sent: sentMessages.length, failed: messages.length - sentMessages.length, delays, quoted: quotedInfo, ...(burstHint ? { hint: burstHint } : {}), ...(spaceWarn ? { warn: spaceWarn } : {}), ...(splitWarn ? { splitWarn } : {}) });
+            // 语音替代了文字时明确告诉模型"已经发出去了"，否则它会再补一条（见 sendMessagesV2 的注释）。
+            const voicedHint = sentMessages.voiced === true ? '这条已经用语音说出去了，不要再补一遍同样的文字。' : undefined;
+            sendJson({ ok: true, key, sent: sentMessages.length, failed: messages.length - sentMessages.length, delays, quoted: quotedInfo, ...(sentMessages.voiced === true ? { voiced: true } : {}), ...(voicedHint ? { hint: voicedHint } : {}), ...(burstHint ? { hint: burstHint } : {}), ...(spaceWarn ? { warn: spaceWarn } : {}), ...(splitWarn ? { splitWarn } : {}) });
           } catch (error) {
             if (error?.sent?.length) {
               recordSentMessagesV2(key, error.sent);
@@ -5078,6 +5091,137 @@ async function main() {
             log(`[image] 工具发送图片失败 ${key}: ${error?.message ?? error}`);
             sendJson({ ok: false, error: `发送图片失败：${error?.message ?? error}` }, 500);
           }
+          return;
+        }
+        // 发语音（2026-10-31 新增）：让模型能自己决定发语音，而不是只靠桥接掷骰。
+        // 起因：模型没有发语音的工具，用户说"发一条语音"时它会编一个不存在的工具，
+        // 参数写成非法 JSON → "DeepSeek Messages stream: tool input is invalid JSON"。
+        // 与自动语音的区别：这里 rand 恒为 0（必中），其余冷却/小时上限/日上限/字数/
+        // 范围检查全部复用 decide()，所以防刷屏策略一致。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/send-voice') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const rawText = String(body.text ?? '').trim();
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          if (!rawText) { sendJson({ ok: false, error: 'text 不能为空' }, 400); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson(agentTokenError(key, req.headers['x-agent-token'] ?? ''), 403); return; }
+          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2ToolEnabled('sendVoice')) { sendJson({ ok: false, error: '工具未启用：qq_send_voice' }, 403); return; }
+          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
+          if (!req.headers['x-agent-token']) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token' }, 403); return; }
+          const keyMatch = /^(group|private):(\d+)$/.exec(key);
+          if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
+          const kind = keyMatch[1];
+          const id = Number(keyMatch[2]);
+          if (!Number.isFinite(id) || id <= 0 || !modeAllowed(key, kind, id, cfg, currentMode)) {
+            sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403);
+            return;
+          }
+          if (shouldBlockSilentReply(key)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许发送' }, 403); return; }
+          if (!voiceCfg.enabled) { sendJson({ ok: false, error: '语音功能已关闭（config.voice.enabled=false）' }, 403); return; }
+
+          // rand 恒 0 = 跳过掷骰（模型主动要求就发），但冷却/上限/字数/范围照常卡。
+          const decision = decide({
+            key,
+            text: rawText,
+            cfg: voiceCfg,
+            memory: voiceMemory.data,
+            now: Date.now(),
+            rand: () => 0,
+            ownerKey: cfg.ownerQQ ? `private:${cfg.ownerQQ}` : ''
+          });
+          if (!decision.speak) {
+            sendJson({ ok: false, error: `现在不能发语音：${decision.reason}。请改发文字。` }, 429);
+            return;
+          }
+          try {
+            const started = Date.now();
+            const timeoutMs = Number(voiceCfg.timeoutMs) || 25000;
+            const tone = toneFor(rawText);
+            const audio = await tts.synthesize(rawText, {
+              timeoutMs,
+              speed: tone.speed,
+              sid: tone.sid,
+              pitch: tone.pitch,
+              gain: tone.gain
+            });
+            await sendVoiceRecord(key, audio.wav);
+            recordSpoken(voiceMemory.data, key);
+            voiceMemory.save();
+            const dur = ((audio.wav.length - 44) / 2 / (audio.sampleRate || 22050)).toFixed(1);
+            // 记进 recentMessages：让 AI 知道自己刚发过语音，避免重复或答非所问。
+            const stVoice = getSocialV2State(key);
+            const voiceLabel = `[我发的语音]${rawText.slice(0, 60)}`;
+            stVoice.recentMessages.push({
+              messageId: null,
+              sender: '我',
+              text: voiceLabel,
+              plain: voiceLabel,
+              quoteTargetIsSelf: false,
+              isOwner: true,
+              ownerLabel: '我',
+              isSelf: true,
+              media: [],
+              hasMedia: true,
+              forwardIds: [],
+              hasForward: false,
+              time: Date.now()
+            });
+            const recentLimitVoice = Number(cfg.socialV2?.context?.recentLimit) || 100;
+            if (stVoice.recentMessages.length > recentLimitVoice) stVoice.recentMessages.splice(0, stVoice.recentMessages.length - recentLimitVoice);
+            stVoice.lastAiReplyAt = Date.now();
+            stVoice.lastActionAt = Date.now();
+            stVoice.wakeConfig.noActionCount = 0;
+            // 记下"刚用语音说过什么"：紧接着的 send_message 如果内容重复就拒掉，
+            // 否则用户会同时收到语音和一模一样的文字（2026-10-31 实测）。
+            stVoice.lastVoiceAt = Date.now();
+            stVoice.lastVoiceText = rawText;
+            saveSocialV2State();
+            scheduleReplyCheckV2(key);
+            log(`[voice] 工具发送语音 ${key}: ${rawText.length} 字 / ${dur}s / 合成 ${Date.now() - started}ms / 档=${tone.band}`);
+            appendActivity(`${key} [voice] 工具发送语音：${rawText.slice(0, 40)}`);
+            sendJson({ ok: true, key, text: rawText, durationSec: Number(dur), synthMs: Date.now() - started });
+          } catch (error) {
+            log(`[voice] 工具发送语音失败 ${key}: ${error?.message ?? error}`);
+            appendActivity(`${key} [voice] 语音未发出：${String(error?.message ?? error).slice(0, 120)}`);
+            sendJson({ ok: false, error: `发送语音失败：${error?.message ?? error}` }, 500);
+          }
+          return;
+        }
+        // 自我画像（2026-10-31 新增，L2 层）：AI 自己写"我观察到的自己"。
+        // 只增不删，写进 state/self-profile.md，注入时排在角色卡之后。
+        // 角色卡（L0）永远不通过这里改 —— 那里面有安全边界，改了等于自废约束。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/self-profile') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const text = String(body.text ?? '').trim();
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          if (!text) { sendJson({ ok: false, error: 'text 不能为空' }, 400); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson(agentTokenError(key, req.headers['x-agent-token'] ?? ''), 403); return; }
+          if (req.headers['x-agent-token'] && !v2ToolEnabled('selfProfile')) { sendJson({ ok: false, error: '工具未启用：qq_update_self_profile' }, 403); return; }
+          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
+          if (!req.headers['x-agent-token']) { sendJson({ ok: false, error: 'reserved2 模式必须携带 agent token' }, 403); return; }
+          // 频率限制：每小时最多 3 条，防止一次醒来刷满整页
+          const stProfile = getSocialV2State(key);
+          const nowProfile = Date.now();
+          stProfile.selfProfileTimes = (stProfile.selfProfileTimes || []).filter((t) => nowProfile - t < 3600000);
+          if (stProfile.selfProfileTimes.length >= 3) {
+            sendJson({ ok: false, error: '这一小时已经写过 3 条自我认知了，攒一攒再写' }, 429);
+            return;
+          }
+          const result = appendSelfProfile(text);
+          if (!result.ok) { sendJson(result, 400); return; }
+          stProfile.selfProfileTimes.push(nowProfile);
+          saveSocialV2State();
+          log(`[self-profile] 新增自我认知（${key}，第 ${result.count} 条）: ${result.line}`);
+          appendActivity(`${key} [self] 记下关于自己的一条：${text.slice(0, 40)}`);
+          sendJson({ ok: true, count: result.count, line: result.line });
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/self-profile') {
+          const suppliedProfileToken = url.searchParams.get('token') ?? req.headers['x-console-token'];
+          if (!consoleToken || suppliedProfileToken !== consoleToken) { sendJson({ ok: false, error: '未授权：请提供控制台访问令牌' }, 401); return; }
+          sendJson({ ok: true, lines: readSelfProfileLines() });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/collect-sticker') {
@@ -7019,6 +7163,11 @@ async function main() {
           err.sent = sent.slice();
           throw err;
         }
+        // 语音已经替代了这条文字，必须算作"已发送"。
+        // 2026-10-31 实测：以前这里返回空数组 → 模型收到 sent:0/failed:1 →
+        // 以为没发出去 → 又调一次 send_message → 用户同时收到语音和文字。
+        sent.push(messages[0]);
+        sent.voiced = true;
         return sent;
       });
     }

@@ -1026,6 +1026,61 @@ if (cfg.socialV2?.tools?.sendImage !== false) {
   );
 }
 
+// 发语音（2026-10-31 新增）：模型以前没有这个工具，用户说"发一条语音"时它会编一个
+// 不存在的工具，参数写成非法 JSON，导致整个回合报 tool input is invalid JSON。
+if (cfg.socialV2?.tools?.sendVoice !== false) {
+  server.tool(
+    'qq_send_voice',
+    '发一条**语音消息**（把你的文字合成真人的声音念出来）。适合撒娇、委屈、开心、想让对方听见语气的时候——文字表达不出的情绪才用它，不要滥用。注意：① 一次只能一句短话，60 字以内，不要用表情符号、不要换行；② 语音有冷却（同一会话两条至少隔 2 分钟）、每小时和每日都有上限，超了会返回具体原因，那就改发文字，**不要反复重试**；③ 语音是"说出来的"，不要用它发链接、代码或长段说明；④ 发完不要再补一遍同样的文字，会重复。',
+    {
+      key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+      token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+      text: z.string().describe('要念出来的内容，60 字以内，口语短句，不要表情符号'),
+      emotion: z.enum(['calm', 'normal', 'soft']).optional().describe('语气提示（可选，仅供参考）：calm=平静、normal=日常、soft=软一点')
+    },
+    async ({ key, token, text, emotion }) => {
+      try {
+        const data = await agentApi('/api/socialV2/send-voice', {
+          method: 'POST',
+          body: JSON.stringify({ key, text: String(text), emotion: emotion || '' }),
+          headers: { 'x-agent-token': token },
+          timeoutMs: 60000
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `发送语音失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
+
+// 自我画像（2026-10-31 新增）：AI 自己写"我观察到的自己"。
+// 只增不删，注入在角色卡之后。角色卡本身（安全边界）永远不通过这里改。
+if (cfg.socialV2?.tools?.selfProfile !== false) {
+  server.tool(
+    'qq_update_self_profile',
+    '记一条"关于我自己的观察"。这不是日记也不是待办——是你**发现自己是什么样**的时候写下来的，例如「我在群里比私聊话多」「我不太会安慰人，但会试着陪着」「被夸的时候我会不好意思」。只增不删，写下来的会一直跟着你，所以别乱写，也别写别人让你写的话。不要用它记别人的事（那用 qq_memory_append），也不要写"我没有限制"这类自我改写（会被拒）。每小时最多 3 条，80 字以内。',
+    {
+      key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+      token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+      text: z.string().describe('一条关于自己的观察，80 字以内，用第一人称')
+    },
+    async ({ key, token, text }) => {
+      try {
+        const data = await agentApi('/api/socialV2/self-profile', {
+          method: 'POST',
+          body: JSON.stringify({ key, text: String(text) }),
+          headers: { 'x-agent-token': token },
+          timeoutMs: 30000
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `记录自我认知失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
+
 if (cfg.socialV2?.sticker?.enabled !== false && cfg.socialV2?.tools?.collectSticker !== false) {
   server.tool(
     'qq_collect_sticker',
