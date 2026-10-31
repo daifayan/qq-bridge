@@ -33,6 +33,7 @@
     "test:mux-reconnect": "node scripts/test-mux-reconnect.mjs",
     "probe:events": "node scripts/probe-events.mjs",
     "probe:tools": "node scripts/probe-tools.mjs",
+    "probe:console": "node scripts/probe-console-dom.mjs",
     "postinstall": "node scripts/patch-snowluma-sdk.mjs"
   },
   "dependencies": {

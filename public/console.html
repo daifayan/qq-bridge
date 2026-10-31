@@ -1018,9 +1018,131 @@
       </details>
     </section>
 
+    <!-- ============ 11 语音设置 ============ -->
+    <section class="card">
+      <h2><span class="sec-no">11</span>语音设置</h2>
+      <div class="row">
+        <label style="flex:1">发语音（本地 TTS · 小雅）</label>
+        <input type="checkbox" id="vcEnabled" style="width:auto">
+      </div>
+      <div class="row">
+        <label style="width:74px">对谁说</label>
+        <select id="vcScope" style="width:150px">
+          <option value="owner">只对老大</option>
+          <option value="private">所有私聊</option>
+          <option value="off">谁都不发</option>
+        </select>
+        <label style="margin-left:12px">代替文字</label>
+        <input type="checkbox" id="vcReplace" style="width:auto">
+      </div>
+      <div class="row">
+        <label style="width:74px">说话频率</label>
+        <input type="range" id="vcProb" min="0" max="100" step="5" style="flex:1">
+        <span class="meta" id="vcProbVal" style="margin:0;width:46px">35%</span>
+      </div>
+      <div class="row">
+        <label style="width:74px">情绪加成</label>
+        <input type="range" id="vcEmo" min="0" max="100" step="5" style="flex:1">
+        <span class="meta" id="vcEmoVal" style="margin:0;width:46px">35%</span>
+      </div>
+      <div class="row">
+        <label style="width:74px">最长字数</label>
+        <input type="number" id="vcMaxChars" min="10" max="300" style="width:80px">
+        <label style="margin-left:12px">冷却</label>
+        <input type="number" id="vcCooldown" min="10" max="3600" style="width:86px">
+        <span class="meta" style="margin:0">秒/会话</span>
+      </div>
+      <div class="row">
+        <label style="width:74px">每小时</label>
+        <input type="number" id="vcHourly" min="1" max="50" style="width:70px">
+        <label style="margin-left:12px">每天</label>
+        <input type="number" id="vcDaily" min="1" max="500" style="width:70px">
+      </div>
+      <div class="row">
+        <label style="width:74px">语速</label>
+        <input type="number" id="vcSpeed" min="0.5" max="2" step="0.05" style="width:70px">
+        <span class="meta" style="margin:0">倍速（0.5 ~ 2）</span>
+      </div>
+      <div class="row">
+        <label style="width:74px">静音时段</label>
+        <input type="checkbox" id="vcQuiet" style="width:auto">
+        <input type="number" id="vcQuietStart" min="0" max="23" style="width:60px">
+        <span class="meta" style="margin:0">点到</span>
+        <input type="number" id="vcQuietEnd" min="0" max="23" style="width:60px">
+        <span class="meta" style="margin:0">点</span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="vcSave" class="small">保存语音设置</button>
+        <span class="meta" id="vcMsg"></span>
+      </div>
+      <div class="meta">⚠ 桥接启动时才读这份配置 —— 保存后要到「18 桥接控制」里重启一次才生效。</div>
+    </section>
+
+    <!-- ============ 12 视频分镜 ============ -->
+    <section class="card">
+      <h2><span class="sec-no">12</span>视频分镜</h2>
+      <div class="row">
+        <label style="flex:1">看懂 QQ 视频（宫格图 + 时间码清单）</label>
+        <input type="checkbox" id="vdEnabled" style="width:auto">
+      </div>
+      <div class="row">
+        <label style="width:74px">宫格</label>
+        <select id="vdCells" style="width:110px">
+          <option value="0">自动</option>
+          <option value="4">4 格</option>
+          <option value="6">6 格</option>
+          <option value="9">9 格</option>
+        </select>
+        <label style="margin-left:12px">台词</label>
+        <select id="vdTranscript" style="width:130px">
+          <option value="off">不转写</option>
+          <option value="auto">自动转写</option>
+        </select>
+      </div>
+      <div class="row">
+        <label style="width:74px">单视频上限</label>
+        <input type="number" id="vdMaxMB" min="1" max="200" style="width:80px">
+        <span class="meta" style="margin:0">MB</span>
+        <label style="margin-left:12px">超时</label>
+        <input type="number" id="vdTimeout" min="20" max="600" step="10" style="width:86px">
+        <span class="meta" style="margin:0">秒</span>
+      </div>
+      <div class="row">
+        <label style="width:74px">产物保留</label>
+        <input type="number" id="vdKeep" min="1" max="30" style="width:70px">
+        <span class="meta" style="margin:0">天</span>
+        <label style="margin-left:12px">清单字数</label>
+        <input type="number" id="vdChars" min="500" max="20000" step="100" style="width:90px">
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="vdSave" class="small">保存视频设置</button>
+        <span class="meta" id="vdMsg"></span>
+      </div>
+      <div class="meta">一条消息只解析第一个视频；超限或失败退化成一行说明文字，不静默吞掉。保存后需重启桥接。</div>
+    </section>
+
+    <!-- ============ 13 QQ 指令 ============ -->
+    <section class="card">
+      <h2><span class="sec-no">13</span>QQ 指令（本机干活）</h2>
+      <div class="row">
+        <label style="flex:1">允许管理员私聊发指令让本机干活</label>
+        <input type="checkbox" id="pjEnabled" style="width:auto">
+      </div>
+      <div class="row">
+        <label style="width:74px">指令前缀</label>
+        <input type="text" id="pjPrefix" maxlength="12" style="width:130px">
+        <span class="meta" style="margin:0" id="pjHint"></span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="pjSave" class="small">保存指令设置</button>
+        <span class="meta" id="pjMsg"></span>
+      </div>
+      <div class="meta" id="pjInfo"></div>
+    </section>
+
     <!-- ============ 11 静默与安全 ============ -->
     <section class="card">
-      <h2><span class="sec-no">11</span>静默开关</h2>
+      <h2><span class="sec-no">14</span>静默开关</h2>
       <div class="row">
         <button id="silentOn">开启静默</button>
         <button id="silentOff">恢复正常</button>
@@ -1029,7 +1151,7 @@
     </section>
 
     <section class="card">
-      <h2><span class="sec-no">12</span>安全拦截通知</h2>
+      <h2><span class="sec-no">15</span>安全拦截通知</h2>
       <div class="row">
         <label style="flex:1">拦截时在群里发提示</label><input type="checkbox" id="secInterceptNotify" style="width:auto">
       </div>
@@ -1042,7 +1164,7 @@
 
     <!-- ============ 12b 控制台访问令牌 ============ -->
     <section class="card">
-      <h2><span class="sec-no">12b</span>控制台访问令牌</h2>
+      <h2><span class="sec-no">16</span>控制台访问令牌</h2>
       <div class="meta">用于打开本控制台 / 调用管理 API 的令牌。可手动输入新令牌保存，或留空生成随机令牌。修改后当前页面会自动使用新令牌。</div>
       <input type="password" id="consoleTokenInput" placeholder="输入新令牌（至少 16 位），留空则生成随机" autocomplete="new-password">
       <div class="row" style="margin-top:8px">
@@ -1054,7 +1176,7 @@
 
     <!-- ============ 13 运维 ============ -->
     <section class="card">
-      <h2><span class="sec-no">13</span>测试发送</h2>
+      <h2><span class="sec-no">17</span>测试发送</h2>
       <div class="row">
         <select id="tsKind" style="width:100px">
           <option value="group">群</option>
@@ -1072,7 +1194,7 @@
     </section>
 
     <section class="card">
-      <h2><span class="sec-no">14</span>桥接控制</h2>
+      <h2><span class="sec-no">18</span>桥接控制</h2>
       <div class="row">
         <button id="restartBtn" class="danger">重启桥接</button>
         <span class="meta" id="restartMsg"></span>
@@ -1086,7 +1208,7 @@
 
     <!-- ============ 15 后台控制端引导 ============ -->
     <section class="card span-all">
-      <h2><span class="sec-no">15</span>后台控制端引导</h2>
+      <h2><span class="sec-no">19</span>后台控制端引导</h2>
       <div class="meta">直接向指定 QQ 会话的 DSH agent 投递一条“后台控制端提醒”，用于给 AI 引导/提醒；该消息不是群友消息。二代模式（reserved2）下会自动附带会话令牌和二代工具协议说明，AI 的文本输出不会自动转发，发言需通过发送工具。</div>
       <div class="row" style="margin-top:10px">
         <select id="aiNotifyKind" style="width:110px">
@@ -1103,7 +1225,7 @@
       </div>
     <!-- ============ 16 空间（评论 / 发布）快捷调整 ============ -->
     <section class="card span-all">
-      <h2><span class="sec-no">16</span>空间（评论 / 发布）快捷调整</h2>
+      <h2><span class="sec-no">20</span>空间（评论 / 发布）快捷调整</h2>
       <div class="meta">鲸鲸在自己 QQ 空间里的自动化行为，改完即时生效（写 state 文件，不用重启桥接）。两条硬事实：<b>① 评论发出去不能程序化撤回</b>，不合适的只能你在手机上手动删；<b>② 说说「真发」默认所有人可见</b>，想先验证链路就选「仅自己可见」。</div>
       <div style="display:flex;gap:20px;flex-wrap:wrap;margin-top:10px">
         <div style="flex:1;min-width:360px">
@@ -2637,6 +2759,169 @@ document.getElementById('secSave').addEventListener('click', async () => {
   if (r.ok) loadSecurity();
 });
 
+// ---------------------------------------------------------------- 语音 / 视频分镜 / QQ 指令
+// 这三段配置住 config.json（2026-10-30 补的面板）。
+// ⚠ 生效时机不一样：voice / video 是桥接启动时快照进实例的，改完要重启；
+//   pcJobs 每次判定现读 cfg，保存即生效。提示语别写错，不然会以为改了没反应。
+
+function setPanelMsg(id, ok, text) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = (ok ? '✅ ' : '❌ ') + text;
+  el.className = ok ? 'meta ok' : 'meta err';
+}
+
+async function loadVoiceCfg() {
+  try {
+    const r = await api('/api/voice');
+    const v = r.voice || {};
+    const prob = Math.round((v.probability ?? 0.35) * 100);
+    const emo = Math.round((v.emotionBoost ?? 0.35) * 100);
+    document.getElementById('vcEnabled').checked = !!v.enabled;
+    document.getElementById('vcReplace').checked = v.replaceText !== false;
+    document.getElementById('vcScope').value = v.scope || 'private';
+    document.getElementById('vcProb').value = prob;
+    document.getElementById('vcProbVal').textContent = prob + '%';
+    document.getElementById('vcEmo').value = emo;
+    document.getElementById('vcEmoVal').textContent = emo + '%';
+    document.getElementById('vcMaxChars').value = v.maxChars ?? 60;
+    document.getElementById('vcCooldown').value = v.cooldownSec ?? 120;
+    document.getElementById('vcHourly').value = v.hourlyCapPerConv ?? 4;
+    document.getElementById('vcDaily').value = v.dailyCap ?? 40;
+    document.getElementById('vcSpeed').value = v.speed ?? 1;
+    const qh = Array.isArray(v.quietHours) ? v.quietHours : null;
+    document.getElementById('vcQuiet').checked = !!qh;
+    document.getElementById('vcQuietStart').value = qh ? qh[0] : 23;
+    document.getElementById('vcQuietEnd').value = qh ? qh[1] : 8;
+    document.getElementById('vcQuietStart').disabled = !qh;
+    document.getElementById('vcQuietEnd').disabled = !qh;
+  } catch (e) {
+    setPanelMsg('vcMsg', false, '读取失败：' + e.message);
+  }
+}
+
+['vcProb', 'vcEmo'].forEach((id) => {
+  document.getElementById(id).addEventListener('input', (e) => {
+    document.getElementById(id + 'Val').textContent = e.target.value + '%';
+  });
+});
+document.getElementById('vcQuiet').addEventListener('change', (e) => {
+  document.getElementById('vcQuietStart').disabled = !e.target.checked;
+  document.getElementById('vcQuietEnd').disabled = !e.target.checked;
+});
+
+document.getElementById('vcSave').addEventListener('click', async () => {
+  const body = {
+    enabled: document.getElementById('vcEnabled').checked,
+    replaceText: document.getElementById('vcReplace').checked,
+    scope: document.getElementById('vcScope').value,
+    probability: Number(document.getElementById('vcProb').value) / 100,
+    emotionBoost: Number(document.getElementById('vcEmo').value) / 100,
+    maxChars: Number(document.getElementById('vcMaxChars').value),
+    cooldownSec: Number(document.getElementById('vcCooldown').value),
+    hourlyCapPerConv: Number(document.getElementById('vcHourly').value),
+    dailyCap: Number(document.getElementById('vcDaily').value),
+    speed: Number(document.getElementById('vcSpeed').value),
+    quietHours: document.getElementById('vcQuiet').checked
+      ? [Number(document.getElementById('vcQuietStart').value), Number(document.getElementById('vcQuietEnd').value)]
+      : null,
+  };
+  try {
+    const r = await api('/api/voice', 'POST', body);
+    if (!r.ok) throw new Error(r.error || '失败');
+    if (r.changed && r.changed.length) {
+      setPanelMsg('vcMsg', true, '已保存（' + r.changed.join('，') + '）· 重启桥接后生效');
+      loadVoiceCfg();
+    } else {
+      setPanelMsg('vcMsg', true, '没有改动');
+    }
+  } catch (e) {
+    setPanelMsg('vcMsg', false, e.message);
+  }
+});
+
+async function loadVideoCfg() {
+  try {
+    const r = await api('/api/video');
+    const v = r.video || {};
+    document.getElementById('vdEnabled').checked = v.enabled !== false;
+    document.getElementById('vdCells').value = String(v.cells ?? 9);
+    document.getElementById('vdTranscript').value = v.transcript === 'auto' ? 'auto' : 'off';
+    document.getElementById('vdMaxMB').value = v.maxMB ?? 40;
+    document.getElementById('vdTimeout').value = v.timeoutSec ?? 150;
+    document.getElementById('vdKeep').value = v.keepDays ?? 2;
+    document.getElementById('vdChars').value = v.maxTextChars ?? 4000;
+  } catch (e) {
+    setPanelMsg('vdMsg', false, '读取失败：' + e.message);
+  }
+}
+
+document.getElementById('vdSave').addEventListener('click', async () => {
+  const body = {
+    enabled: document.getElementById('vdEnabled').checked,
+    cells: Number(document.getElementById('vdCells').value),
+    transcript: document.getElementById('vdTranscript').value,
+    maxMB: Number(document.getElementById('vdMaxMB').value),
+    timeoutSec: Number(document.getElementById('vdTimeout').value),
+    keepDays: Number(document.getElementById('vdKeep').value),
+    maxTextChars: Number(document.getElementById('vdChars').value),
+  };
+  try {
+    const r = await api('/api/video', 'POST', body);
+    if (!r.ok) throw new Error(r.error || '失败');
+    if (r.changed && r.changed.length) {
+      setPanelMsg('vdMsg', true, '已保存（' + r.changed.join('，') + '）· 重启桥接后生效');
+      loadVideoCfg();
+    } else {
+      setPanelMsg('vdMsg', true, '没有改动');
+    }
+  } catch (e) {
+    setPanelMsg('vdMsg', false, e.message);
+  }
+});
+
+async function loadPcJobsCfg() {
+  try {
+    const r = await api('/api/pcjobs');
+    const p = r.pcJobs || {};
+    document.getElementById('pjEnabled').checked = p.enabled !== false;
+    document.getElementById('pjPrefix').value = p.prefix || '指令';
+    document.getElementById('pjHint').textContent = '发「' + (p.prefix || '指令') + ' 帮我看看磁盘」这样';
+    document.getElementById('pjInfo').textContent =
+      (p.ownerPrivateOnly ? '只有管理员私聊能触发' : '⚠ 所有私聊都能触发')
+      + '（管理员 ' + (p.ownerQQ || '未设置') + '）· 干活目录 ' + (p.cwd || '未配置')
+      + ' · 预设 ' + (p.preset || 'standard')
+      + '。群聊会话永远没有本机工具。';
+  } catch (e) {
+    setPanelMsg('pjMsg', false, '读取失败：' + e.message);
+  }
+}
+
+document.getElementById('pjPrefix').addEventListener('input', (e) => {
+  const v = e.target.value.trim() || '指令';
+  document.getElementById('pjHint').textContent = '发「' + v + ' 帮我看看磁盘」这样';
+});
+
+document.getElementById('pjSave').addEventListener('click', async () => {
+  const body = {
+    enabled: document.getElementById('pjEnabled').checked,
+    prefix: document.getElementById('pjPrefix').value,
+  };
+  try {
+    const r = await api('/api/pcjobs', 'POST', body);
+    if (!r.ok) throw new Error(r.error || '失败');
+    if (r.changed && r.changed.length) {
+      // pcJobs 是现读的，这里可以老实说立即生效
+      setPanelMsg('pjMsg', true, '已保存（' + r.changed.join('，') + '）· 立即生效');
+      loadPcJobsCfg();
+    } else {
+      setPanelMsg('pjMsg', true, '没有改动');
+    }
+  } catch (e) {
+    setPanelMsg('pjMsg', false, e.message);
+  }
+});
+
 async function changeConsoleToken(generate) {
   const input = document.getElementById('consoleTokenInput');
   const msg = document.getElementById('consoleTokenMsg');
@@ -2805,7 +3090,7 @@ if (toTopBtn) toTopBtn.addEventListener('click', () => window.scrollTo({ top: 0,
 initLayout();
 
 // 首屏先拉一遍（SSE 连上后也会推一次全量，这里是为了页面尽快有内容）
-refresh(); refreshRoles(); refreshWhitelist(); refreshSessions(); refreshPending(); refreshPresets(); loadSocialForm(); loadV2Config(); refreshV2Activity(); loadV2ToolLog(); loadV2SessionOptions(); refreshSocialStatus(); refreshSlang(); loadSlangConfig(); loadSecurity(); loadContacts(); loadQzonePanel();
+refresh(); refreshRoles(); refreshWhitelist(); refreshSessions(); refreshPending(); refreshPresets(); loadSocialForm(); loadV2Config(); refreshV2Activity(); loadV2ToolLog(); loadV2SessionOptions(); refreshSocialStatus(); refreshSlang(); loadSlangConfig(); loadSecurity(); loadContacts(); loadQzonePanel(); loadVoiceCfg(); loadVideoCfg(); loadPcJobsCfg();
 
 // ===== 实时推送（SSE）=====
 // 以前每 3 秒打 5 个接口（status/sessions/pending/social/slang）。

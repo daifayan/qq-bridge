@@ -72,6 +72,9 @@ export function loadPaths({ refresh = false } = {}) {
     snowDir: pick('SNOWDIR', ''),
     bridgeDir: pick('BRIDGEDIR', ROOT),
     logDir: pick('LOGDIR', resolve(ROOT, '..', 'bridge-logs')),
+    // QQ 客户端本体：SnowLuma 只能挂到「已经登录」的 QQ 上，
+    // 所以启动链路需要自己把 QQ 拉起来（留空 = 不自动拉起）。
+    qqExe: pick('QQEXE', ''),
     warnings,
     source: batPath
   };

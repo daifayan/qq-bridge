@@ -26,12 +26,30 @@ echo    Desktop runtime(43129) + SnowLuma(5099/3000/3001) + QQ-Bridge(3100)
 echo ============================================================
 echo.
 echo    QQ must be running and logged in: SnowLuma attaches to QQ.
+echo    If QQ is closed, step 0 below tries to start it (paths.bat QQEXE).
+echo.
+
+REM ---- 0) QQ client -----------------------------------------------
+REM  SnowLuma can only attach to a running, logged-in QQ. Without this
+REM  step a cold boot ends in "OneBot did not answer" 60 seconds later,
+REM  and the real cause (QQ was never started) is easy to miss.
+REM  Skipped silently when QQEXE is empty in paths.bat.
+set "NODE_EXE=%NODE%"
+if not defined NODE_EXE set "NODE_EXE=node"
+echo [1/4] QQ client   : checking...
+"%NODE_EXE%" "%BRIDGEDIR%\scripts\ensure-qq.mjs" --wait 40
+if errorlevel 1 (
+  echo       [WARN] QQ could not be started automatically.
+  echo              Open QQ yourself and log in, then run this script again.
+) else (
+  echo       QQ is up. If it shows a QR code, finish logging in now.
+)
 echo.
 
 REM ---- 1) DSH Desktop app (prefers 43129) -----------------------
 tasklist /FI "IMAGENAME eq DSH Desktop.exe" 2>nul | findstr /I "DSH Desktop.exe" >nul
 if !errorlevel!==0 (
-  echo [1/3] DSH Desktop : already running - skipped
+  echo [2/4] DSH Desktop : already running - skipped
   netstat -ano | findstr ":43129 " | findstr "LISTENING" >nul 2>&1
   if !errorlevel! neq 0 (
     echo       [WARN] DSH Desktop is running but 43129 is not listening.
@@ -40,15 +58,15 @@ if !errorlevel!==0 (
 ) else (
   netstat -ano | findstr ":43129 " | findstr "LISTENING" >nul 2>&1
   if !errorlevel!==0 (
-    echo [1/3] DSH Desktop : port 43129 is already in use - desktop app not started.
+    echo [2/4] DSH Desktop : port 43129 is already in use - desktop app not started.
     echo       Close the process using 43129, then run this again.
     echo       Starting the desktop app now would put it on a temporary port.
   ) else (
     if exist "%DSHEXE%" (
-      echo [1/3] DSH Desktop : starting desktop app...
+      echo [2/4] DSH Desktop : starting desktop app...
       start "" "%DSHEXE%"
     ) else if exist "%BRIDGEDIR%\start-desktop-runtime.bat" (
-      echo [1/3] DSH Desktop : executable not found, using CLI runtime fallback...
+      echo [2/4] DSH Desktop : executable not found, using CLI runtime fallback...
       start "DSH Desktop Runtime" "%BRIDGEDIR%\start-desktop-runtime.bat"
     ) else (
       echo       [ERROR] neither DSH Desktop nor start-desktop-runtime.bat found
@@ -59,9 +77,9 @@ if !errorlevel!==0 (
 REM ---- 2) SnowLuma -----------------------------------------------
 netstat -ano | findstr ":5099 " | findstr "LISTENING" >nul 2>&1
 if !errorlevel!==0 (
-  echo [2/3] SnowLuma    : already running on 5099 - skipped
+  echo [3/4] SnowLuma    : already running on 5099 - skipped
 ) else (
-  echo [2/3] SnowLuma    : starting...
+  echo [3/4] SnowLuma    : starting...
   if exist "%BRIDGEDIR%\start-snowluma.bat" (
     start "SnowLuma" /min "%BRIDGEDIR%\start-snowluma.bat"
   ) else (
@@ -99,9 +117,9 @@ if !ONEBOT!==1 (
 REM ---- 3) QQ-Bridge ----------------------------------------------
 netstat -ano | findstr ":3100 " | findstr "LISTENING" >nul 2>&1
 if !errorlevel!==0 (
-  echo [3/3] QQ-Bridge   : already running on 3100 - skipped
+  echo [4/4] QQ-Bridge   : already running on 3100 - skipped
 ) else (
-  echo [3/3] QQ-Bridge   : starting... daemon, auto-restarts on crash
+  echo [4/4] QQ-Bridge   : starting... daemon, auto-restarts on crash
   if exist "%BRIDGEDIR%\start.bat" (
     start "qq-bridge" /min "%BRIDGEDIR%\start.bat"
   ) else (
