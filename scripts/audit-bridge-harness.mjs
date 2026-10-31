@@ -17,6 +17,7 @@ import * as sticker from '../src/sticker-lib.js';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
 import { createApiAdapter } from '../src/api-adapt.js';
 import { createTts } from '../src/tts.js';
+import { createVideoStoryboard } from '../src/video-storyboard.js';
 import { toSpeakable, hasSpeakableContent } from '../src/tts-text.js';
 import { decide, recordSpoken, createVoiceMemory } from '../src/voice-policy.js';
 
@@ -77,6 +78,9 @@ export async function bridgeHarness({ config = {}, savedState, globals = {} } = 
     SnowLumaWebSocketClient: FakeBot, text: (s) => s,
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector, createApiAdapter,
     createTts, toSpeakable, hasSpeakableContent, decide, recordSpoken, createVoiceMemory,
+    // 视频分镜（9d1f757 加的调用）也得注入，否则 vm 里 ReferenceError。
+    // 只构造不执行：createVideoStoryboard 构造期只解析 CLI 路径，不碰网络也不跑 ffmpeg。
+    createVideoStoryboard,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...globals,
   });
