@@ -19,9 +19,10 @@ import { looksLikeUnfinished } from './v2-wait.js';
 import { safeFetchBuffer, looksLikeImageBuffer } from './safe-fetch.js';
 import { createApiAdapter } from './api-adapt.js';
 import { createVideoStoryboard } from './video-storyboard.js';
-import { createTts } from './tts.js';
+import { createTts, concatWav } from './tts.js';
 import { toSpeakable, hasSpeakableContent } from './tts-text.js';
-import { decide, recordSpoken, createVoiceMemory } from './voice-policy.js';
+import { decide, recordSpoken, createVoiceMemory, emotionScore } from './voice-policy.js';
+import { resolveTone, sanitizeTone, DEFAULT_TONE } from './voice-tone.js';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import {
   loadSlang,
@@ -52,6 +53,9 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const STATE_DIR = path.join(ROOT, 'state');
+// 语音引擎要到 main() 中段才建（要读 config、起 worker 线程），但控制台的调音台接口
+// 在 HTTP 处理器里就要用 → 用这个晚绑定引用，没就绪时接口老实返回 503，不炸。
+let voiceEngine = null;
 const STATE_FILE = path.join(STATE_DIR, 'sessions.json');
 const ROLE_STATE_FILE = path.join(STATE_DIR, 'current-role.json');
 const SLANG_FILE = path.join(STATE_DIR, 'slang.json');
@@ -3228,6 +3232,147 @@ async function main() {
           return;
         }
 
+        // ── 语音调音台（2026-10-31） ──────────────────────────────────────────
+        // 和 /api/voice 的分工：
+        //   /api/voice      发不发、频率、上限 —— 桥接启动时快照，改完要重启
+        //   /api/voice/lab  音调、音量、情绪映射、语气词 —— 每句现读 cfg，改完立即生效
+        // 所以这里返回 needRestart:false 是老实话，不是假装热更新。
+        const readTone = (raw) => {
+          const t = raw ?? {};
+          const d = DEFAULT_TONE;
+          return sanitizeTone({
+            enabled: t.enabled !== false,
+            pitch: numOr(t.pitch, d.pitch),
+            gain: numOr(t.gain, d.gain),
+            emotion: {
+              on: t.emotion?.on !== false,
+              calm: t.emotion?.calm ?? d.emotion.calm,
+              normal: t.emotion?.normal ?? d.emotion.normal,
+              soft: t.emotion?.soft ?? d.emotion.soft
+            },
+            clips: t.clips ?? d.clips
+          });
+        };
+
+        if (req.method === 'GET' && url.pathname === '/api/voice/lab') {
+          const onDisk = readJsonSafe(path.join(ROOT, 'config.json'), {}, true);
+          const v = onDisk.voice ?? {};
+          const local = v.local ?? {};
+          sendJson({
+            ok: true,
+            needRestart: false,
+            engine: String(v.engine || 'local'),
+            modelDir: String(local.modelDir ?? ''),
+            speed: numOr(local.speed, 1),
+            sid: numOr(local.sid, 0),
+            sampleRate: voiceEngine?.info?.sampleRate || 0,
+            numSpeakers: voiceEngine?.info?.numSpeakers || 1,
+            tone: readTone(v.tone),
+          });
+          return;
+        }
+
+        if (req.method === 'POST' && url.pathname === '/api/voice/lab') {
+          const body = await readBody();
+          const configFile = path.join(ROOT, 'config.json');
+          const file = readJsonSafe(configFile, null, true);
+          const v = { ...(file.voice ?? {}) };
+          const local = { ...(v.local ?? {}) };
+          const changed = [];
+
+          if (body.speed !== undefined && body.speed !== null && body.speed !== '') {
+            const sp = clampNum(numOr(body.speed, 1), 0.5, 2);
+            if (numOr(local.speed, 1) !== sp) { local.speed = sp; changed.push(`语速=${sp}`); }
+          }
+          if (body.sid !== undefined && body.sid !== null && body.sid !== '') {
+            const sid = clampNum(Math.round(numOr(body.sid, 0)), 0, 99);
+            if (numOr(local.sid, 0) !== sid) { local.sid = sid; changed.push(`音色=${sid}`); }
+          }
+
+          const nextTone = readTone({ ...(v.tone ?? {}), ...(body.tone ?? {}) });
+          const before = JSON.stringify(readTone(v.tone));
+          if (JSON.stringify(nextTone) !== before) changed.push('调音参数');
+
+          if (!changed.length) {
+            sendJson({ ok: true, needRestart: false, changed: [], note: '没有改动' });
+            return;
+          }
+
+          v.local = local;
+          v.tone = nextTone;
+          file.voice = v;
+          atomicWriteJson(configFile, file);
+          // 运行中的桥接也立刻拿到新值（合成时每句现读 cfg.voice）
+          cfg.voice = { ...(cfg.voice ?? {}), local, tone: nextTone };
+          log(`控制台：调音台已更新（${changed.join('，')}）—— 立即生效`);
+          sendJson({ ok: true, needRestart: false, changed, tone: nextTone, speed: numOr(local.speed, 1), sid: numOr(local.sid, 0) });
+          return;
+        }
+
+        if (req.method === 'POST' && url.pathname === '/api/voice/lab/preview') {
+          const body = await readBody();
+          const engine = voiceEngine;
+          if (!engine) {
+            sendJson({ ok: false, error: '语音引擎还没初始化（桥接刚启动？稍等几秒再试）' }, 503);
+            return;
+          }
+          let text;
+          try {
+            text = toSpeakable(String(body.text ?? ''), { maxChars: 200 });
+          } catch (error) {
+            sendJson({ ok: false, error: `文本清洗失败：${error?.message ?? error}` }, 400);
+            return;
+          }
+          if (!text || !hasSpeakableContent(text)) {
+            sendJson({ ok: false, error: '这段文字没有可念的内容' }, 400);
+            return;
+          }
+          const onDisk = readJsonSafe(path.join(ROOT, 'config.json'), {}, true);
+          const local = (onDisk.voice ?? {}).local ?? {};
+          const tone = resolveTone({
+            tone: readTone(body.tone),
+            emotion: emotionScore(text),
+            baseSpeed: numOr(body.speed, numOr(local.speed, 1)),
+            baseSid: numOr(body.sid, numOr(local.sid, 0)),
+          });
+          try {
+            const audio = await engine.synthesize(text, {
+              timeoutMs: 30000,
+              speed: tone.speed,
+              sid: tone.sid,
+              pitch: tone.pitch,
+              gain: tone.gain,
+            });
+            const dur = audio.format === 'wav' ? (audio.wav.length - 44) / 2 / (audio.sampleRate || 22050) : 0;
+            res.writeHead(200, {
+              'content-type': 'audio/wav',
+              'content-length': audio.wav.length,
+              'cache-control': 'no-store',
+              'x-tone-band': tone.band,
+              'x-tone-pitch': String(tone.pitch),
+              'x-tone-speed': tone.speed.toFixed(3),
+              'x-tone-gain': tone.gain.toFixed(3),
+              'x-audio-sec': dur.toFixed(2),
+              'x-audio-ms': String(audio.ms || 0),
+              ...SECURITY_HEADERS,
+            });
+            res.end(audio.wav);
+          } catch (error) {
+            sendJson({ ok: false, error: String(error?.message ?? error) }, 500);
+          }
+          return;
+        }
+
+        if (req.method === 'GET' && url.pathname === '/voice-lab') {
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', ...SECURITY_HEADERS });
+          try {
+            res.end(fs.readFileSync(path.join(ROOT, 'public', 'voice-lab.html'), 'utf8'));
+          } catch {
+            res.end('调音台页面缺失：qq-bridge/public/voice-lab.html');
+          }
+          return;
+        }
+
         if (req.method === 'GET' && url.pathname === '/api/video') {
           const onDisk = readJsonSafe(path.join(ROOT, 'config.json'), {}, true);
           const v = { ...(onDisk.video ?? {}) };
@@ -6256,6 +6401,7 @@ async function main() {
   // 这里只做三件事：判定 → 合成 → 发 record 段。任何一步失败都只降级成文字，不静默。
   const voiceCfg = cfg.voice || {};
   const tts = createTts(voiceCfg, { log, rootDir: ROOT });
+  voiceEngine = tts;
   const voiceMemory = createVoiceMemory(path.join(STATE_DIR, 'voice.json'));
 
   async function sendVoiceRecord(key, wav) {
@@ -6316,6 +6462,19 @@ async function main() {
     return { decision, spoken, replace };
   }
 
+  // 这一句按什么音色念。
+  // 调音参数（音调/音量/情绪映射）每句现读 cfg.voice —— 所以调音台改完立即生效；
+  // 模型目录、引擎仍是启动时的快照，那两样要重启。
+  function toneFor(text) {
+    const v = cfg.voice ?? voiceCfg;
+    return resolveTone({
+      tone: v.tone,
+      emotion: emotionScore(text),
+      baseSpeed: Number(v.local?.speed) || 1,
+      baseSid: Number(v.local?.sid) || 0,
+    });
+  }
+
   // 真正合成 + 经 OneBot 发语音，挂到 sendChain 排队；失败只降级、不静默。
   function enqueueVoice(key, plan) {
     const assertSendAllowed = captureSendGuard(key);
@@ -6323,12 +6482,50 @@ async function main() {
       .then(async () => {
         assertSendAllowed();
         const started = Date.now();
-        const audio = await tts.synthesize(plan.decision.text, { timeoutMs: Number(voiceCfg.timeoutMs) || 25000 });
-        await sendVoiceRecord(key, audio.wav);
+        const timeoutMs = Number(voiceCfg.timeoutMs) || 25000;
+        const tone = toneFor(plan.decision.text);
+        const audio = await tts.synthesize(plan.decision.text, {
+          timeoutMs,
+          speed: tone.speed,
+          sid: tone.sid,
+          pitch: tone.pitch,
+          gain: tone.gain,
+        });
+
+        // 语气词：从词库随机挑一个，跟正文拼成一条语音（间隔留一点气口）。
+        // 词条也走同一个 TTS 合成，第二次就命中缓存，不用另存素材文件。
+        let wav = audio.wav;
+        let clipWord = '';
+        const clips = (cfg.voice ?? voiceCfg).tone?.clips;
+        if (clips?.on && Array.isArray(clips.list) && clips.list.length && Math.random() < (Number(clips.chance) || 0)) {
+          const word = String(clips.list[Math.floor(Math.random() * clips.list.length)] || '').trim();
+          if (word) {
+            try {
+              const clip = await tts.synthesize(word, {
+                timeoutMs,
+                speed: tone.speed,
+                sid: tone.sid,
+                pitch: tone.pitch,
+                gain: tone.gain,
+              });
+              wav = concatWav([clip.wav, audio.wav], { gapMs: Number(clips.gapMs) || 90 });
+              clipWord = word;
+            } catch (error) {
+              log(`语气词「${word}」没拼上，只念正文：${error?.message ?? error}`);
+            }
+          }
+        }
+
+        await sendVoiceRecord(key, wav);
         recordSpoken(voiceMemory.data, key);
         voiceMemory.save();
-        const dur = audio.format === 'wav' ? ((audio.wav.length - 44) / 2 / (audio.sampleRate || 22050)).toFixed(1) : '?';
-        log(`语音已发 (${key}) ${plan.decision.text.length} 字 / ${dur}s 音频 / 合成 ${Date.now() - started}ms${plan.replace ? '（替代文字）' : ''}`);
+        const isWav = wav === audio.wav ? audio.format === 'wav' : true;
+        const dur = isWav ? ((wav.length - 44) / 2 / (audio.sampleRate || 22050)).toFixed(1) : '?';
+        log(
+          `语音已发 (${key}) ${plan.decision.text.length} 字 / ${dur}s 音频 / 合成 ${Date.now() - started}ms` +
+            ` / 档=${tone.band} 音调=${tone.pitch} 语速=${tone.speed.toFixed(2)}` +
+            `${clipWord ? `（语气词「${clipWord}」）` : ''}${plan.replace ? '（替代文字）' : ''}`
+        );
         appendActivity(`${key} 发了一条语音：${plan.decision.text.slice(0, 40)}`);
       })
       .catch((error) => {

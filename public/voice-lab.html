@@ -1,0 +1,642 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>语音调音台 · QQ 桥接</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --card: #1a1d24;
+    --card-2: #151820;
+    --border: #2a2f3a;
+    --text: #e5e7eb;
+    --muted: #9ca3af;
+    --dim: #6b7280;
+    --accent: #3b82f6;
+    --accent-2: #60a5fa;
+    --ok: #34d399;
+    --warn: #fbbf24;
+    --err: #f87171;
+    --pill-bg: #1e3a5f;
+    --pill-fg: #7dd3fc;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: radial-gradient(1200px 600px at 20% -10%, #1a2333 0%, var(--bg) 55%);
+    color: var(--text);
+    margin: 0;
+    padding: 22px 22px 90px;
+    min-height: 100vh;
+  }
+  header {
+    max-width: 1180px;
+    margin: 0 auto 18px;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  h1 { font-size: 21px; margin: 0 0 5px; letter-spacing: .3px; }
+  .sub { color: var(--muted); font-size: 12.5px; line-height: 1.6; }
+  .sub code { background: #232833; padding: 1px 5px; border-radius: 4px; font-size: 11.5px; }
+  .badges { display: flex; gap: 8px; flex-wrap: wrap; }
+  .pill {
+    background: var(--card); border: 1px solid var(--border); border-radius: 999px;
+    padding: 6px 12px; font-size: 12px; color: var(--muted); white-space: nowrap;
+  }
+  .pill b { color: var(--text); font-weight: 600; }
+  .pill.accent { background: var(--pill-bg); border-color: #2b5a86; color: var(--pill-fg); }
+
+  main {
+    max-width: 1180px; margin: 0 auto;
+    display: grid; grid-template-columns: 1.05fr .95fr; gap: 16px; align-items: start;
+  }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+    padding: 16px 16px 14px;
+  }
+  .card + .card { margin-top: 16px; }
+  .card h2 {
+    font-size: 14px; margin: 0 0 12px; font-weight: 600; letter-spacing: .4px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .card h2 .tag {
+    font-size: 11px; font-weight: 400; color: var(--dim);
+    border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px;
+  }
+  .card h2 .spacer { flex: 1; }
+
+  /* ---- 试听区 ---- */
+  textarea {
+    width: 100%; min-height: 78px; resize: vertical;
+    background: var(--card-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 12px; font-size: 14px; line-height: 1.6; font-family: inherit;
+  }
+  textarea:focus { outline: none; border-color: var(--accent); }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .row.mt { margin-top: 10px; }
+  button {
+    font-family: inherit; font-size: 13px; cursor: pointer;
+    background: #232833; color: var(--text);
+    border: 1px solid var(--border); border-radius: 9px; padding: 8px 14px;
+    transition: .15s;
+  }
+  button:hover { background: #2b3140; border-color: #3a4150; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { background: #2f74e6; }
+  button.ghost { background: transparent; }
+  button.tiny { padding: 4px 9px; font-size: 12px; border-radius: 7px; }
+
+  .playbar {
+    margin-top: 12px; display: flex; align-items: center; gap: 10px;
+    background: var(--card-2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 8px 12px; min-height: 44px;
+  }
+  .playbar audio { flex: 1; height: 32px; display: none; }
+  .playbar audio.ready { display: block; }
+  .playbar .empty { color: var(--dim); font-size: 12.5px; }
+
+  .result { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+  .result .kv {
+    background: var(--card-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 5px 10px; color: var(--muted);
+  }
+  .result .kv b { color: var(--text); font-weight: 600; }
+  .result .kv.band-soft b { color: #f9a8d4; }
+  .result .kv.band-calm b { color: #93c5fd; }
+  .result .kv.band-normal b { color: var(--ok); }
+  .msg { font-size: 12.5px; color: var(--muted); min-height: 18px; }
+  .msg.err { color: var(--err); }
+  .msg.ok { color: var(--ok); }
+
+  /* ---- 滑杆 ---- */
+  .ctrl { margin-bottom: 14px; }
+  .ctrl:last-child { margin-bottom: 4px; }
+  .ctrl-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    font-size: 12.5px; color: var(--muted); margin-bottom: 6px;
+  }
+  .ctrl-head b {
+    color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums;
+    font-size: 13px;
+  }
+  .ctrl-head .hint { color: var(--dim); font-size: 11.5px; }
+  input[type=range] {
+    -webkit-appearance: none; appearance: none; width: 100%; height: 22px;
+    background: transparent; cursor: pointer; margin: 0;
+  }
+  input[type=range]::-webkit-slider-runnable-track {
+    height: 5px; border-radius: 3px;
+    background: linear-gradient(90deg, #2b3a52 0%, #37425a 100%);
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
+    background: var(--accent-2); border: 2px solid #0f1115; margin-top: -6px;
+    box-shadow: 0 0 0 1px #3b82f6 inset;
+  }
+  input[type=range]:focus { outline: none; }
+  .scale { display: flex; justify-content: space-between; font-size: 11px; color: var(--dim); margin-top: 2px; }
+
+  /* ---- 情绪档 ---- */
+  .bands { display: grid; gap: 10px; }
+  .band {
+    background: var(--card-2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 12px 8px;
+  }
+  .band-head {
+    display: flex; align-items: center; gap: 8px; font-size: 12.5px; margin-bottom: 8px;
+  }
+  .band-head .dot { width: 7px; height: 7px; border-radius: 50%; }
+  .band-head .name { font-weight: 600; }
+  .band-head .desc { color: var(--dim); font-size: 11.5px; }
+  .band-head .spacer { flex: 1; }
+  .band-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .band .ctrl { margin-bottom: 6px; }
+  .band .ctrl-head { font-size: 12px; }
+
+  /* ---- 开关 ---- */
+  .switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-size: 12.5px; color: var(--muted); }
+  .switch input { display: none; }
+  .switch .track {
+    width: 38px; height: 21px; border-radius: 999px; background: #333a48;
+    position: relative; transition: .18s; flex: none;
+  }
+  .switch .track::after {
+    content: ""; position: absolute; top: 3px; left: 3px; width: 15px; height: 15px;
+    border-radius: 50%; background: #9ca3af; transition: .18s;
+  }
+  .switch input:checked + .track { background: #1d4ed8; }
+  .switch input:checked + .track::after { left: 20px; background: #fff; }
+
+  /* ---- 语气词 ---- */
+  .chips { display: flex; flex-wrap: wrap; gap: 7px; margin: 10px 0; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: #232833; border: 1px solid var(--border); border-radius: 999px;
+    padding: 4px 8px 4px 12px; font-size: 12.5px;
+  }
+  .chip button {
+    border: none; background: transparent; color: var(--dim); padding: 0 2px;
+    font-size: 14px; line-height: 1; border-radius: 50%;
+  }
+  .chip button:hover { color: var(--err); background: transparent; }
+  .chip-add { display: flex; gap: 8px; }
+  .chip-add input {
+    flex: 1; background: var(--card-2); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); padding: 7px 10px; font-size: 12.5px; font-family: inherit;
+  }
+  .chip-add input:focus { outline: none; border-color: var(--accent); }
+
+  /* ---- 底部固定条 ---- */
+  footer {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    background: rgba(15,17,21,.92); backdrop-filter: blur(10px);
+    border-top: 1px solid var(--border); padding: 12px 22px;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    z-index: 10;
+  }
+  footer .inner { max-width: 1180px; margin: 0 auto; width: 100%; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  footer .note { color: var(--dim); font-size: 12px; }
+  footer .grow { flex: 1; }
+  a.link { color: var(--accent-2); text-decoration: none; font-size: 12.5px; }
+  a.link:hover { text-decoration: underline; }
+  .loading { color: var(--dim); font-size: 13px; padding: 30px 0; text-align: center; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>语音调音台</h1>
+    <div class="sub">
+      不换模型，只改输出：<code>音调</code> <code>语速</code> <code>音量</code> <code>情绪映射</code> <code>语气词</code>。
+      改完点保存，<b>下一句语音就按新的念</b>，不用重启桥接。
+    </div>
+  </div>
+  <div class="badges">
+    <span class="pill" id="pillEngine">引擎 —</span>
+    <span class="pill" id="pillModel">模型 —</span>
+    <span class="pill" id="pillVoice">音色 —</span>
+    <a class="link" href="/" style="align-self:center">← 回控制台</a>
+  </div>
+</header>
+
+<main>
+  <div>
+    <section class="card">
+      <h2>试听<span class="tag">调完立刻听</span><span class="spacer"></span>
+        <label class="switch" title="拖动滑杆后自动念一遍">
+          <input type="checkbox" id="autoPlay" checked><span class="track"></span>自动试听
+        </label>
+      </h2>
+      <textarea id="text" spellcheck="false">诶嘿，我在呢～今天想让我干点啥？</textarea>
+      <div class="row mt">
+        <button class="primary" id="play">▶ 试听这句</button>
+        <button class="ghost" id="playRaw" title="忽略调音参数，听模型原声">听原声对比</button>
+        <span class="grow"></span>
+        <span class="msg" id="msg"></span>
+      </div>
+      <div class="playbar">
+        <audio id="player" controls preload="none"></audio>
+        <span class="empty" id="playerHint">还没有音频 —— 点「试听这句」</span>
+      </div>
+      <div class="result" id="result"></div>
+    </section>
+
+    <section class="card">
+      <h2>语气词<span class="tag">开头垫一句</span><span class="spacer"></span>
+        <label class="switch">
+          <input type="checkbox" id="clipOn"><span class="track"></span>启用
+        </label>
+      </h2>
+      <div class="ctrl">
+        <div class="ctrl-head"><span>出现概率</span><b id="clipChanceVal">25%</b></div>
+        <input type="range" id="clipChance" min="0" max="100" step="5">
+        <div class="scale"><span>从不</span><span>每句都垫</span></div>
+      </div>
+      <div class="chips" id="chips"></div>
+      <div class="chip-add">
+        <input id="chipInput" maxlength="8" placeholder="加一个语气词，比如：诶嘿 / 唔… / 嗯？">
+        <button class="tiny" id="chipAdd">添加</button>
+      </div>
+      <div class="sub" style="margin-top:10px">
+        语气词也是用同一个模型念的（念一次就进缓存），所以音色是一致的。
+        太长的词会念得很怪，<b>建议 1~3 个字</b>。
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>小抄<span class="tag">调的时候看这里</span></h2>
+      <div class="sub" style="line-height:1.9">
+        · <b>变调原理</b>：让模型按 <code>1/r</code> 的语速念，再把波形按 <code>r</code> 重采样 ——
+        时长基本不变、音高变，共振峰跟着上移，所以正数会"更幼"。<br>
+        · <b>负向变调会略慢一点</b>（模型的语速不是线性的），觉得拖就抬一点语速补回来。<br>
+        · <b>音量</b>是软限幅，推很猛也不会爆音，但会压掉动态，1.0~1.3 就够。<br>
+        · <b>情绪映射</b>只影响音调/语速的偏移，不改"发不发语音"的判断 —— 那是控制台「11 语音设置」的事。<br>
+        · 快捷键：<code>Ctrl/⌘ + Enter</code> 试听，<code>Ctrl/⌘ + S</code> 保存。
+      </div>
+    </section>
+  </div>
+
+  <div>
+    <section class="card">
+      <h2>基础调音<span class="tag">整句生效</span><span class="spacer"></span>
+        <label class="switch">
+          <input type="checkbox" id="toneOn"><span class="track"></span>启用调音
+        </label>
+      </h2>
+      <div class="ctrl" id="sidBlock" style="display:none">
+        <div class="ctrl-head"><span>音色号</span><b id="sidVal">0</b></div>
+        <input type="range" id="sid" min="0" max="0" step="1">
+        <div class="scale"><span>0</span><span id="sidMax">—</span></div>
+      </div>
+      <div class="ctrl">
+        <div class="ctrl-head"><span>音调</span><b id="pitchVal">0.0 半音</b></div>
+        <input type="range" id="pitch" min="-6" max="6" step="0.1">
+        <div class="scale"><span>-6 更沉</span><span>0 原声</span><span>+6 更幼</span></div>
+      </div>
+      <div class="ctrl">
+        <div class="ctrl-head"><span>语速</span><b id="speedVal">1.00×</b></div>
+        <input type="range" id="speed" min="0.6" max="1.6" step="0.01">
+        <div class="scale"><span>0.6 慢</span><span>1.0</span><span>1.6 快</span></div>
+      </div>
+      <div class="ctrl">
+        <div class="ctrl-head"><span>音量</span><b id="gainVal">1.00×</b></div>
+        <input type="range" id="gain" min="0.5" max="2" step="0.02">
+        <div class="scale"><span>0.5 轻</span><span>1.0</span><span>2.0 响</span></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>情绪映射<span class="tag">按语气自动微调</span><span class="spacer"></span>
+        <label class="switch">
+          <input type="checkbox" id="emoOn"><span class="track"></span>启用
+        </label>
+      </h2>
+      <div class="sub" style="margin:-4px 0 12px">
+        一句话的情绪浓度由 <code>voice-policy.js</code> 算（语气词、感叹号、波浪号越多越高），
+        落到下面三档里挑一组偏移，叠在基础调音上。
+      </div>
+      <div class="bands" id="bands"></div>
+    </section>
+  </div>
+</main>
+
+<footer>
+  <div class="inner">
+    <button class="primary" id="save">保存并生效</button>
+    <button class="ghost" id="reset">撤销改动</button>
+    <span class="note" id="footMsg">音调/语速/音量/情绪/语气词 —— 保存后立即生效；换模型或引擎才需要重启。</span>
+    <span class="grow"></span>
+    <a class="link" href="/" >控制台</a>
+  </div>
+</footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+// 控制台令牌：跟 console.html 共用同一个 localStorage
+(() => {
+  const t = new URLSearchParams(location.search).get('token');
+  if (t) localStorage.setItem('consoleToken', t);
+})();
+const token = localStorage.getItem('consoleToken');
+const headers = () => (token ? { 'x-console-token': token } : {});
+
+const BANDS = [
+  { id: 'calm', name: '平静', desc: '没什么情绪 / 陈述句', color: '#60a5fa' },
+  { id: 'normal', name: '正常', desc: '日常对话', color: '#34d399' },
+  { id: 'soft', name: '黏人', desc: '撒娇、感叹、拖长音', color: '#f9a8d4' }
+];
+
+let tone = null;          // 当前编辑中的调音参数（未保存）
+let base = { speed: 1, sid: 0 }; // 属于 config.voice.local 的两个值
+let dirty = false;
+let timer = null;
+let playing = false;
+
+const fmt = {
+  pitch: (v) => (v > 0 ? '+' : '') + Number(v).toFixed(1),
+  speed: (v) => Number(v).toFixed(2) + '×',
+  gain: (v) => Number(v).toFixed(2) + '×'
+};
+
+function setMsg(text, kind = '') {
+  const el = $('msg');
+  el.textContent = text || '';
+  el.className = 'msg' + (kind ? ' ' + kind : '');
+}
+
+function markDirty() {
+  dirty = true;
+  $('footMsg').textContent = '有未保存的改动 —— 点「保存并生效」才会写进 config.json';
+  $('footMsg').style.color = 'var(--warn)';
+}
+function markClean(text) {
+  dirty = false;
+  $('footMsg').textContent = text || '音调/语速/音量/情绪/语气词 —— 保存后立即生效；换模型或引擎才需要重启。';
+  $('footMsg').style.color = '';
+}
+
+// ---------------------------------------------------------------- 渲染
+function renderBands() {
+  const box = $('bands');
+  box.innerHTML = BANDS.map((b) => {
+    const c = tone.emotion[b.id] || { pitch: 0, speed: 1 };
+    return `
+      <div class="band" data-band="${b.id}">
+        <div class="band-head">
+          <span class="dot" style="background:${b.color}"></span>
+          <span class="name">${b.name}</span>
+          <span class="desc">${b.desc}</span>
+        </div>
+        <div class="band-grid">
+          <div class="ctrl">
+            <div class="ctrl-head"><span>音调</span><b data-v="pitch">${fmt.pitch(c.pitch)}</b></div>
+            <input type="range" data-k="pitch" min="-4" max="4" step="0.1" value="${c.pitch}">
+          </div>
+          <div class="ctrl">
+            <div class="ctrl-head"><span>语速</span><b data-v="speed">${fmt.speed(c.speed)}</b></div>
+            <input type="range" data-k="speed" min="0.8" max="1.2" step="0.01" value="${c.speed}">
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+
+  box.querySelectorAll('.band').forEach((el) => {
+    const id = el.dataset.band;
+    el.querySelectorAll('input[type=range]').forEach((input) => {
+      input.addEventListener('input', () => {
+        const k = input.dataset.k;
+        const v = Number(input.value);
+        tone.emotion[id][k] = v;
+        el.querySelector(`b[data-v="${k}"]`).textContent = k === 'pitch' ? fmt.pitch(v) : fmt.speed(v);
+        onEdit();
+      });
+    });
+  });
+}
+
+function renderChips() {
+  const box = $('chips');
+  const list = tone.clips.list || [];
+  box.innerHTML = list.length
+    ? list.map((w, i) => `<span class="chip">${escapeHtml(w)}<button data-i="${i}" title="删掉">×</button></span>`).join('')
+    : `<span class="sub">还没有语气词</span>`;
+  box.querySelectorAll('button[data-i]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      tone.clips.list.splice(Number(btn.dataset.i), 1);
+      renderChips();
+      onEdit();
+    });
+  });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function syncControls() {
+  $('toneOn').checked = tone.enabled !== false;
+  $('emoOn').checked = tone.emotion.on !== false;
+  $('clipOn').checked = tone.clips.on === true;
+
+  $('pitch').value = tone.pitch;
+  $('pitchVal').textContent = fmt.pitch(tone.pitch) + ' 半音';
+  $('speed').value = base.speed;
+  $('speedVal').textContent = fmt.speed(base.speed);
+  $('gain').value = tone.gain;
+  $('gainVal').textContent = fmt.gain(tone.gain);
+  $('clipChance').value = Math.round((tone.clips.chance || 0) * 100);
+  $('clipChanceVal').textContent = Math.round((tone.clips.chance || 0) * 100) + '%';
+}
+
+function syncBadges(info) {
+  $('pillEngine').innerHTML = `引擎 <b>${escapeHtml(info.engine || '—')}</b>`;
+  const model = String(info.modelDir || '').split(/[\\/]/).filter(Boolean).pop() || '—';
+  $('pillModel').innerHTML = `模型 <b>${escapeHtml(model)}</b>`;
+  const n = Number(info.numSpeakers) || 1;
+  $('pillVoice').innerHTML = n > 1
+    ? `音色 <b>${n}</b> 个可选（当前 ${info.sid}）`
+    : `音色 <b>1</b> 个（单音色模型）`;
+
+  // 多音色模型才给音色号滑杆 —— 单音色模型显示它只是噪音
+  const block = $('sidBlock');
+  if (n > 1) {
+    block.style.display = '';
+    $('sid').max = String(n - 1);
+    $('sid').value = String(base.sid || 0);
+    $('sidVal').textContent = String(base.sid || 0);
+    $('sidMax').textContent = String(n - 1);
+  } else {
+    block.style.display = 'none';
+  }
+}
+
+// ---------------------------------------------------------------- 交互
+function onEdit() {
+  markDirty();
+  if (!$('autoPlay').checked) return;
+  clearTimeout(timer);
+  timer = setTimeout(() => preview(), 450);
+}
+
+async function preview({ raw = false } = {}) {
+  const text = $('text').value.trim();
+  if (!text) { setMsg('先写一句要念的话', 'err'); return; }
+  const btn = raw ? $('playRaw') : $('play');
+  btn.disabled = true;
+  setMsg(raw ? '合成原声…' : '合成中…');
+  try {
+    const payload = { text, speed: base.speed, sid: base.sid, tone: raw ? { ...tone, enabled: false } : tone };
+    const res = await fetch('/api/voice/lab/preview', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers() },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || `HTTP ${res.status}`);
+    }
+    const blob = await res.blob();
+    const band = res.headers.get('x-tone-band') || '?';
+    const pitch = Number(res.headers.get('x-tone-pitch') || 0);
+    const speed = Number(res.headers.get('x-tone-speed') || 0);
+    const gain = Number(res.headers.get('x-tone-gain') || 1);
+    const sec = Number(res.headers.get('x-audio-sec') || 0);
+    const ms = Number(res.headers.get('x-audio-ms') || 0);
+
+    const audio = $('player');
+    audio.src = URL.createObjectURL(blob);
+    audio.classList.add('ready');
+    $('playerHint').style.display = 'none';
+    audio.play().catch(() => setMsg('合成好了，点播放键听一下', ''));
+    playing = true;
+
+    const bandName = { calm: '平静', normal: '正常', soft: '黏人' }[band] || band;
+    $('result').innerHTML = raw
+      ? `<span class="kv">原声对比 · 关掉调音</span><span class="kv">时长 <b>${sec.toFixed(2)}s</b></span>`
+      : `<span class="kv band-${band}">情绪档 <b>${bandName}</b></span>
+         <span class="kv">音调 <b>${fmt.pitch(pitch)}</b></span>
+         <span class="kv">语速 <b>${fmt.speed(speed)}</b></span>
+         <span class="kv">音量 <b>${fmt.gain(gain)}</b></span>
+         <span class="kv">时长 <b>${sec.toFixed(2)}s</b></span>
+         <span class="kv">合成 <b>${ms}ms</b></span>`;
+    setMsg('');
+  } catch (error) {
+    setMsg('没合成出来：' + (error?.message || error), 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function load() {
+  try {
+    const res = await fetch('/api/voice/lab', { headers: headers() });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || '读取失败');
+    tone = data.tone;
+    base = { speed: data.speed, sid: data.sid };
+    syncBadges(data);
+    syncControls();
+    renderBands();
+    renderChips();
+    markClean();
+  } catch (error) {
+    setMsg('读不到配置：' + (error?.message || error), 'err');
+  }
+}
+
+async function save() {
+  const btn = $('save');
+  btn.disabled = true;
+  $('footMsg').textContent = '保存中…';
+  $('footMsg').style.color = '';
+  try {
+    const res = await fetch('/api/voice/lab', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers() },
+      body: JSON.stringify({ speed: base.speed, sid: base.sid, tone })
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || '保存失败');
+    if (data.tone) tone = data.tone;
+    markClean(data.changed?.length ? `✅ 已保存（${data.changed.join('、')}）—— 下一句语音就按这个念` : '没有改动');
+    setMsg('已保存，下一句就生效', 'ok');
+  } catch (error) {
+    $('footMsg').textContent = '保存失败：' + (error?.message || error);
+    $('footMsg').style.color = 'var(--err)';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// 滑杆
+const bind = (id, key, valId, formatter, opts = {}) => {
+  $(id).addEventListener('input', (e) => {
+    const v = Number(e.target.value);
+    if (key === 'speed') base.speed = v;
+    else if (key === 'clipChance') tone.clips.chance = v / 100;
+    else tone[key] = v;
+    $(valId).textContent = formatter(v);
+    onEdit();
+  });
+};
+bind('pitch', 'pitch', 'pitchVal', (v) => fmt.pitch(v) + ' 半音');
+bind('speed', 'speed', 'speedVal', (v) => fmt.speed(v));
+bind('gain', 'gain', 'gainVal', (v) => fmt.gain(v));
+bind('clipChance', 'clipChance', 'clipChanceVal', (v) => Math.round(v) + '%');
+
+// 音色号（只有多音色模型才会显示出来）
+$('sid').addEventListener('input', (e) => {
+  base.sid = Number(e.target.value);
+  $('sidVal').textContent = String(base.sid);
+  $('pillVoice').innerHTML = `音色 <b>${Number($('sid').max) + 1}</b> 个可选（当前 ${base.sid}）`;
+  onEdit();
+});
+
+// 开关
+$('toneOn').addEventListener('change', (e) => { tone.enabled = e.target.checked; onEdit(); });
+$('emoOn').addEventListener('change', (e) => { tone.emotion.on = e.target.checked; onEdit(); });
+$('clipOn').addEventListener('change', (e) => { tone.clips.on = e.target.checked; onEdit(); });
+
+// 语气词
+$('chipAdd').addEventListener('click', () => {
+  const v = $('chipInput').value.trim().slice(0, 8);
+  if (!v) return;
+  if (tone.clips.list.includes(v)) { $('chipInput').value = ''; return; }
+  if (tone.clips.list.length >= 12) { setMsg('最多 12 个语气词', 'err'); return; }
+  tone.clips.list.push(v);
+  $('chipInput').value = '';
+  renderChips();
+  onEdit();
+});
+$('chipInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); $('chipAdd').click(); }
+});
+
+$('play').addEventListener('click', () => preview());
+$('playRaw').addEventListener('click', () => preview({ raw: true }));
+$('save').addEventListener('click', save);
+$('reset').addEventListener('click', load);
+
+// 快捷键：Ctrl/Cmd + Enter 试听，Ctrl/Cmd + S 保存
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); preview(); }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); save(); }
+});
+window.addEventListener('beforeunload', (e) => {
+  if (dirty) { e.preventDefault(); e.returnValue = ''; }
+});
+
+load();
+</script>
+</body>
+</html>

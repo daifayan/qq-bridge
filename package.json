@@ -26,6 +26,8 @@
     "verify:adaptation": "node scripts/verify-dsh-015-adaptation.mjs",
     "test:api-adapt": "node scripts/test-api-adapt.mjs",
     "test:video": "node scripts/test-video-storyboard.mjs",
+    "test:voice-tone": "node scripts/test-voice-tone.mjs",
+    "voice:preview": "node scripts/preview-tone.mjs",
     "verify:persona": "node scripts/verify-persona-config.mjs",
     "test:mcp-servers": "node scripts/test-mcp-servers-stdio.mjs",
     "test:plugin": "node scripts/test-qq-mode-plugin.mjs",

@@ -9,8 +9,11 @@
  */
 import { Worker } from 'node:worker_threads'
 import { createHash } from 'node:crypto'
+import { resample, applyGain, concatSamples, decodeWav, semitonesToRatio } from './voice-tone.js'
 
 const CACHE_LIMIT = 120
+const clamp = (v, min, max) => Math.min(max, Math.max(min, v))
+const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d)
 
 /** Float32 采样 → 16bit PCM WAV */
 export function encodeWav(samples, sampleRate) {
@@ -47,11 +50,24 @@ export function sniffAudio(buf) {
   return { format: 'unknown', sampleRate: 0 }
 }
 
+/** 几段 WAV 拼成一条（语气词 + 正文），段之间留一小段静音 */
+export function concatWav(buffers, { gapMs = 90 } = {}) {
+  const decoded = (buffers || []).map((b) => decodeWav(b)).filter(Boolean)
+  if (!decoded.length) throw new Error('concatWav：没有可用的 WAV')
+  const sampleRate = decoded[0].sampleRate
+  // 采样率不一致就不拼了 —— 硬拼会变调，宁可只念正文
+  if (decoded.some((d) => d.sampleRate !== sampleRate)) throw new Error('concatWav：采样率不一致')
+  const merged = concatSamples(decoded.map((d) => d.samples), { gapMs, sampleRate })
+  return encodeWav(merged, sampleRate)
+}
+
 export function createTts(cfg = {}, { log = () => {}, rootDir = process.cwd() } = {}) {
   const engine = String(cfg.engine || 'local').toLowerCase()
   const cache = new Map()
   let worker = null
   let ready = null
+  let lastInfo = null
+  let warnedHttpPitch = false
   let seq = 0
   const waiting = new Map()
 
@@ -88,7 +104,8 @@ export function createTts(cfg = {}, { log = () => {}, rootDir = process.cwd() } 
     const w = new Worker(new URL('./tts-worker.js', import.meta.url))
     w.on('message', (msg) => {
       if (msg?.type === 'ready') {
-        log(`TTS 就绪（${msg.loadMs}ms，采样率 ${msg.sampleRate}）`)
+        lastInfo = { sampleRate: msg.sampleRate || 0, numSpeakers: msg.numSpeakers || 1, loadMs: msg.loadMs || 0 }
+        log(`TTS 就绪（${msg.loadMs}ms，采样率 ${msg.sampleRate}，${msg.numSpeakers || 1} 个音色）`)
         return
       }
       if (msg?.type === 'fatal') {
@@ -133,7 +150,7 @@ export function createTts(cfg = {}, { log = () => {}, rootDir = process.cwd() } 
     log(`TTS 线程已回收（${reason}）`)
   }
 
-  function synthLocal(text, timeoutMs) {
+  function synthLocal(text, { timeoutMs = 20000, speed, sid } = {}) {
     const w = ensureWorker()
     const id = ++seq
     return new Promise((resolve, reject) => {
@@ -144,7 +161,7 @@ export function createTts(cfg = {}, { log = () => {}, rootDir = process.cwd() } 
       }, timeoutMs)
       waiting.set(id, { resolve, reject, timer })
       const local = localConfig()
-      w.postMessage({ type: 'synth', id, text, sid: local.sid, speed: local.speed, local })
+      w.postMessage({ type: 'synth', id, text, sid: sid ?? local.sid, speed: speed ?? local.speed, local })
     })
   }
 
@@ -174,27 +191,67 @@ export function createTts(cfg = {}, { log = () => {}, rootDir = process.cwd() } 
 
   /**
    * 合成一段文字。
+   *
+   * opts 里的 speed / sid / pitch / gain 是「这一句」的覆盖值（不传就用 config 里的），
+   * 所以调音台改完参数不用重启桥接 —— 下一句就按新参数念。
+   *
+   * pitch 单位是半音：内部让模型按 1/r 的语速念，再把波形按 r 重采样，
+   * 时长不变、音高变（原理见 voice-tone.js）。
+   *
    * @returns {Promise<{wav: Buffer, format: string, sampleRate: number, ms: number, engine: string}>}
    */
-  async function synthesize(text, { timeoutMs = 20000 } = {}) {
+  async function synthesize(text, { timeoutMs = 20000, speed, sid, pitch, gain } = {}) {
     const input = String(text ?? '').trim()
     if (!input) throw new Error('TTS 输入为空')
     if (engine === 'off') throw new Error('语音引擎已关闭')
 
-    const key = createHash('sha1').update(`${engine}|${JSON.stringify(cfg.local || {})}|${input}`).digest('hex')
+    const local = localConfig()
+    const semitones = clamp(num(pitch, 0), -8, 8)
+    const ratio = semitonesToRatio(semitones)
+    const finalSpeed = clamp(num(speed, local.speed), 0.5, 2)
+    const finalSid = Math.max(0, Math.round(num(sid, local.sid)))
+    const finalGain = clamp(num(gain, 1), 0.3, 3)
+    // 变调 = 先按 1/r 的语速念 + 再按 r 重采样 → 时长回到原样，音高 ×r
+    const modelSpeed = clamp(finalSpeed / ratio, 0.4, 2.5)
+
+    const key = createHash('sha1')
+      .update(`${engine}|${JSON.stringify(cfg.local || {})}|${finalSpeed}|${finalSid}|${ratio}|${finalGain}|${input}`)
+      .digest('hex')
     if (cache.has(key)) return { ...cache.get(key), cached: true }
 
     let result
     if (engine === 'http') {
       result = await synthHttp(input, timeoutMs)
-      result.sampleRate = result.sampleRate || sniffAudio(result.wav).sampleRate
+      const { format, sampleRate } = sniffAudio(result.wav)
+      result.sampleRate = result.sampleRate || sampleRate
+      // HTTP 引擎给的若是 16bit PCM WAV，也能变调；mp3 就得交给上游自己处理
+      if (format === 'wav' && (Math.abs(ratio - 1) > 1e-6 || Math.abs(finalGain - 1) > 1e-3)) {
+        const decoded = decodeWav(result.wav)
+        if (decoded) {
+          let samples = decoded.samples
+          if (Math.abs(ratio - 1) > 1e-6) samples = resample(samples, ratio)
+          if (Math.abs(finalGain - 1) > 1e-3) samples = applyGain(samples, finalGain)
+          result.wav = encodeWav(samples, decoded.sampleRate)
+          result.sampleRate = decoded.sampleRate
+        }
+      } else if (format !== 'wav' && Math.abs(ratio - 1) > 1e-6 && !warnedHttpPitch) {
+        warnedHttpPitch = true
+        log('⚠️ HTTP 引擎返回的不是 WAV，变调被忽略（要变调请让上游输出 wav）')
+      }
     } else if (engine === 'local') {
-      const out = await synthLocal(input, timeoutMs)
-      const wav = encodeWav(out.samples, out.sampleRate)
+      const out = await synthLocal(input, { timeoutMs, speed: modelSpeed, sid: finalSid })
+      let samples = out.samples
+      if (Math.abs(ratio - 1) > 1e-6) samples = resample(samples, ratio)
+      if (Math.abs(finalGain - 1) > 1e-3) samples = applyGain(samples, finalGain)
+      const wav = encodeWav(samples, out.sampleRate)
       result = { wav, format: 'wav', sampleRate: out.sampleRate, ms: out.ms, engine: 'local' }
     } else {
       throw new Error(`未知的语音引擎：${engine}`)
     }
+    result.pitch = semitones
+    result.speed = finalSpeed
+    result.gain = finalGain
+    result.sid = finalSid
 
     if (cache.size >= CACHE_LIMIT) {
       const first = cache.keys().next().value
@@ -207,6 +264,10 @@ export function createTts(cfg = {}, { log = () => {}, rootDir = process.cwd() } 
   return {
     engine,
     synthesize,
+    /** 模型加载后的实况（音色数 / 采样率）；还没加载过就是 null */
+    get info() {
+      return lastInfo
+    },
     /** 提前把模型加载好，免得第一句语音多等几秒 */
     warmup() {
       if (engine !== 'local') return
