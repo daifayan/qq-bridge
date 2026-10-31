@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>角色管理 · QQ 桥接</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --card: #1a1d24;
+    --card-2: #151820;
+    --border: #2a2f3a;
+    --text: #e5e7eb;
+    --muted: #9ca3af;
+    --dim: #6b7280;
+    --accent: #3b82f6;
+    --accent-2: #60a5fa;
+    --ok: #34d399;
+    --warn: #fbbf24;
+    --err: #f87171;
+    --pill-bg: #1e3a5f;
+    --pill-fg: #7dd3fc;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: radial-gradient(1200px 600px at 20% -10%, #1a2333 0%, var(--bg) 55%);
+    color: var(--text);
+    margin: 0;
+    padding: 22px 22px 60px;
+    min-height: 100vh;
+  }
+  header {
+    max-width: 1180px;
+    margin: 0 auto 18px;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  h1 { font-size: 21px; margin: 0 0 5px; letter-spacing: .3px; }
+  .sub { color: var(--muted); font-size: 12.5px; line-height: 1.7; max-width: 720px; }
+  .sub code { background: #232833; padding: 1px 5px; border-radius: 4px; font-size: 11.5px; }
+  .badges { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .pill {
+    background: var(--card); border: 1px solid var(--border); border-radius: 999px;
+    padding: 6px 12px; font-size: 12px; color: var(--muted); white-space: nowrap;
+  }
+  .pill b { color: var(--text); font-weight: 600; }
+  .pill.accent { background: var(--pill-bg); border-color: #2b5a86; color: var(--pill-fg); }
+
+  main { max-width: 1180px; margin: 0 auto; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 14px;
+  }
+  .role {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 16px 16px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 11px;
+    transition: border-color .15s;
+  }
+  .role:hover { border-color: #3a4150; }
+  .role.current { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(59,130,246,.25) inset; }
+  .role-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .role-name { font-size: 15.5px; font-weight: 600; letter-spacing: .2px; }
+  .tag {
+    font-size: 10.5px; padding: 2px 7px; border-radius: 999px;
+    background: var(--pill-bg); color: var(--pill-fg); border: 1px solid #2b5a86;
+  }
+  .tag.dim { background: #232833; color: var(--dim); border-color: var(--border); }
+
+  .stats { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--muted); }
+  .stats span b { color: var(--text); font-weight: 600; }
+  .bar {
+    height: 4px; border-radius: 999px; background: #232833; overflow: hidden;
+  }
+  .bar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+
+  .actions { display: flex; gap: 8px; margin-top: 2px; }
+  button {
+    font: inherit; font-size: 12.5px; padding: 7px 13px; border-radius: 9px; cursor: pointer;
+    background: #232833; color: var(--text); border: 1px solid var(--border);
+    transition: background .15s, border-color .15s;
+  }
+  button:hover { background: #2b3140; border-color: #3a4150; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { background: #2f6fd0; }
+  button.ghost { background: transparent; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.danger { color: var(--err); }
+
+  .empty { color: var(--dim); font-size: 13px; padding: 30px 0; text-align: center; }
+
+  /* 编辑器抽屉 */
+  .drawer {
+    position: fixed; inset: 0; background: rgba(5,7,10,.72);
+    display: none; align-items: center; justify-content: center; padding: 24px; z-index: 50;
+  }
+  .drawer.open { display: flex; }
+  .panel {
+    background: var(--card-2); border: 1px solid var(--border); border-radius: 16px;
+    width: min(880px, 100%); max-height: 88vh; display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .panel-head {
+    padding: 14px 18px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  }
+  .panel-head h2 { font-size: 14.5px; margin: 0; font-weight: 600; }
+  .panel-head .meta { font-size: 11.5px; color: var(--dim); }
+  .panel-body { padding: 14px 18px; overflow: auto; }
+  textarea {
+    width: 100%; min-height: 46vh; resize: vertical;
+    background: #0e1116; color: var(--text); border: 1px solid var(--border);
+    border-radius: 10px; padding: 12px 13px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px; line-height: 1.75;
+  }
+  textarea:focus { outline: none; border-color: var(--accent); }
+  .panel-foot {
+    padding: 12px 18px; border-top: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  }
+  .hint { font-size: 11.5px; color: var(--dim); }
+  .hint b { color: var(--warn); }
+
+  #toast {
+    position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%) translateY(20px);
+    background: #1f2530; border: 1px solid var(--border); color: var(--text);
+    padding: 10px 18px; border-radius: 10px; font-size: 13px;
+    opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; z-index: 60;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #toast.err { border-color: #6b2b2b; color: #fca5a5; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>角色管理</h1>
+    <div class="sub">
+      每个角色一套独立的会话、记忆和唤醒配置 —— 切过去等于换一个脑子，互不串味。<br>
+      当前角色：<code id="curName">读取中…</code>　·　切换会重建会话（<b style="color:var(--warn)">当前对话上下文会丢</b>，记忆本保留）
+    </div>
+  </div>
+  <div class="badges">
+    <span class="pill" id="pillCount">共 0 个角色</span>
+    <button class="ghost" id="btnRefresh">刷新</button>
+  </div>
+</header>
+
+<main>
+  <div class="grid" id="grid">
+    <div class="empty">加载中…</div>
+  </div>
+</main>
+
+<div class="drawer" id="drawer">
+  <div class="panel">
+    <div class="panel-head">
+      <div>
+        <h2 id="editorTitle">编辑角色卡</h2>
+        <div class="meta" id="editorMeta"></div>
+      </div>
+      <button class="ghost" id="btnClose">关闭</button>
+    </div>
+    <div class="panel-body">
+      <textarea id="editor" spellcheck="false"></textarea>
+    </div>
+    <div class="panel-foot">
+      <div class="hint">保存前会自动备份成 <code>.bak-时间戳</code>。<b>这一层是 L0 内核</b>：写的是性格底色和安全边界，AI 自己改不了。</div>
+      <div class="actions">
+        <button id="btnCancel">取消</button>
+        <button class="primary" id="btnSave">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+(() => {
+  const qs = new URLSearchParams(location.search);
+  const t = qs.get('token');
+  if (t) localStorage.setItem('consoleToken', t);
+  const token = localStorage.getItem('consoleToken');
+  const headers = () => (token ? { 'x-console-token': token } : {});
+
+  const $ = (id) => document.getElementById(id);
+  const grid = $('grid');
+  let state = { roles: [], current: null };
+  let editing = null;
+
+  function toast(msg, isErr) {
+    const el = $('toast');
+    el.textContent = msg;
+    el.className = 'show' + (isErr ? ' err' : '');
+    clearTimeout(el._timer);
+    el._timer = setTimeout(() => { el.className = ''; }, 2600);
+  }
+
+  function fmtBytes(n) {
+    if (!n) return '—';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1024 / 1024).toFixed(2) + ' MB';
+  }
+
+  function fmtAgo(ms) {
+    if (!ms) return '还没用过';
+    const diff = Date.now() - ms;
+    if (diff < 60000) return '刚刚';
+    if (diff < 3600000) return Math.floor(diff / 60000) + ' 分钟前';
+    if (diff < 86400000) return Math.floor(diff / 3600000) + ' 小时前';
+    return Math.floor(diff / 86400000) + ' 天前';
+  }
+
+  async function api(path, opts = {}) {
+    const res = await fetch(path, {
+      ...opts,
+      headers: { 'content-type': 'application/json', ...headers(), ...(opts.headers || {}) }
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || body.ok === false) throw new Error(body.error || ('HTTP ' + res.status));
+    return body;
+  }
+
+  function render() {
+    $('curName').textContent = state.current || '（无角色）';
+    $('pillCount').innerHTML = '共 <b>' + state.roles.length + '</b> 个角色';
+    if (!state.roles.length) {
+      grid.innerHTML = '<div class="empty">roles/ 目录下还没有角色卡</div>';
+      return;
+    }
+    grid.innerHTML = state.roles.map((r) => {
+      const memTotal = r.topics + r.thoughts + r.impressions;
+      const memPct = Math.min(100, memTotal * 4);
+      return `
+      <div class="role ${r.isCurrent ? 'current' : ''}" data-name="${escapeAttr(r.name)}">
+        <div class="role-head">
+          <span class="role-name">${escapeHtml(r.name)}</span>
+          ${r.isCurrent ? '<span class="tag">当前</span>' : ''}
+          ${r.conversations === 0 && r.sessions === 0 ? '<span class="tag dim">空白</span>' : ''}
+        </div>
+        <div class="stats">
+          <span>角色卡 <b>${r.cardLines}</b> 行 · <b>${fmtBytes(r.cardBytes)}</b></span>
+          <span>会话 <b>${r.conversations}</b></span>
+          <span>记忆 <b>${memTotal}</b>（话题 ${r.topics} / 想说 ${r.thoughts} / 印象 ${r.impressions}）</span>
+          <span>状态 <b>${fmtBytes(r.stateBytes)}</b> · ${fmtAgo(r.lastModified)}</span>
+        </div>
+        <div class="bar"><i style="width:${memPct}%"></i></div>
+        <div class="actions">
+          <button class="primary" data-act="switch" ${r.isCurrent ? 'disabled' : ''}>${r.isCurrent ? '正在使用' : '切换到这个'}</button>
+          <button data-act="edit">编辑角色卡</button>
+        </div>
+      </div>`;
+    }).join('');
+
+    grid.querySelectorAll('.role').forEach((card) => {
+      const name = card.dataset.name;
+      card.querySelector('[data-act="switch"]')?.addEventListener('click', () => switchRole(name));
+      card.querySelector('[data-act="edit"]')?.addEventListener('click', () => openEditor(name));
+    });
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+  function escapeAttr(s) { return escapeHtml(s); }
+
+  async function load() {
+    try {
+      const data = await api('/api/roles/stats');
+      state.roles = data.roles || [];
+      state.current = data.current || null;
+      render();
+    } catch (error) {
+      grid.innerHTML = '<div class="empty">加载失败：' + escapeHtml(error.message) + '</div>';
+    }
+  }
+
+  async function switchRole(name) {
+    if (!confirm(`切换到「${name}」？\n\n它会有自己独立的会话和记忆。\n当前角色正在进行的对话上下文会丢失（记忆本保留）。`)) return;
+    try {
+      await api('/api/role', { method: 'POST', body: JSON.stringify({ role: name }) });
+      toast('已切换到「' + name + '」');
+      await load();
+    } catch (error) {
+      toast('切换失败：' + error.message, true);
+    }
+  }
+
+  async function openEditor(name) {
+    try {
+      const data = await api('/api/roles/content?name=' + encodeURIComponent(name));
+      editing = name;
+      $('editorTitle').textContent = '编辑：' + name;
+      $('editorMeta').textContent = 'L0 内核 · AI 只读，只有管理员能改';
+      $('editor').value = data.content;
+      $('drawer').classList.add('open');
+    } catch (error) {
+      toast('读取失败：' + error.message, true);
+    }
+  }
+
+  function closeEditor() {
+    $('drawer').classList.remove('open');
+    editing = null;
+  }
+
+  async function saveEditor() {
+    if (!editing) return;
+    const content = $('editor').value;
+    if (!content.trim()) { toast('内容不能为空', true); return; }
+    try {
+      $('btnSave').disabled = true;
+      const data = await api('/api/roles/content', {
+        method: 'POST',
+        body: JSON.stringify({ name: editing, content })
+      });
+      toast('已保存（备份 ' + data.backup + '）');
+      closeEditor();
+      await load();
+    } catch (error) {
+      toast('保存失败：' + error.message, true);
+    } finally {
+      $('btnSave').disabled = false;
+    }
+  }
+
+  $('btnRefresh').addEventListener('click', load);
+  $('btnClose').addEventListener('click', closeEditor);
+  $('btnCancel').addEventListener('click', closeEditor);
+  $('btnSave').addEventListener('click', saveEditor);
+  $('drawer').addEventListener('click', (e) => { if (e.target.id === 'drawer') closeEditor(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeEditor(); });
+
+  load();
+  setInterval(load, 30000);
+})();
+</script>
+</body>
+</html>

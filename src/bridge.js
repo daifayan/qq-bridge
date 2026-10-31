@@ -234,7 +234,17 @@ function readRoleState() {
   return readJsonSafe(ROLE_STATE_FILE, { role: null, mode: 'active' });
 }
 function writeRoleState(role, mode) {
+  const prevRole = activeRole;
   atomicWriteJson(ROLE_STATE_FILE, { role: role ?? null, mode: mode ?? 'active' });
+  activeRole = sanitizeRoleName(role ?? '');
+  // 角色真的变了才"换脑子"（静默/恢复只改 mode，不该重载状态）。
+  if (prevRole !== activeRole && typeof roleSwitchHook === 'function') {
+    try {
+      roleSwitchHook(prevRole, activeRole);
+    } catch (error) {
+      console.error(`[role] 切换角色状态失败（${prevRole || '无'} → ${activeRole || '无'}）：${error?.message ?? error}`);
+    }
+  }
 }
 function sanitizeRoleName(name) {
   return String(name ?? '').replace(/[^\w\u4e00-\u9fff-]/g, '');
@@ -652,16 +662,19 @@ function loadConfig() {
 // ── 状态持久化（QQ 会话 ↔ DSH 会话映射） ─────────────────────────────────────
 let state = { sessions: {} };
 function loadState() {
-  const loaded = readJsonSafe(STATE_FILE, null);
+  const loaded = readJsonSafe(roleStateFile(activeRole), null);
   if (loaded && loaded.sessions && typeof loaded.sessions === 'object') state = loaded;
   else state = { sessions: {} };
   if (!state.sessionPolicies || typeof state.sessionPolicies !== 'object' || Array.isArray(state.sessionPolicies)) state.sessionPolicies = {};
 }
-function saveState() {
+// role 参数用于切角色时"把旧状态存回旧角色的文件"——此时 activeRole 已经指向新角色了，
+// 不显式传就会把旧数据写进新角色的文件（2026-10-31 踩过）。
+function saveState(role = activeRole) {
   fs.mkdirSync(STATE_DIR, { recursive: true });
-  const tmp = STATE_FILE + '.tmp';
+  const file = roleStateFile(role);
+  const tmp = file + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
-  fs.renameSync(tmp, STATE_FILE);
+  fs.renameSync(tmp, file);
 }
 
 // ── 单实例锁 ─────────────────────────────────────────────────────────────────
@@ -2808,6 +2821,81 @@ async function main() {
           sendJson({ roles: listRoles(), current: rs.role ?? null });
           return;
         }
+        // 角色管理面板用：每个角色的卡大小 + 独立状态统计（会话/话题/印象/文件大小）。
+        if (req.method === 'GET' && url.pathname === '/api/roles/stats') {
+          const rs = readRoleState();
+          const currentName = rs.role ?? null;
+          const roles = listRoles().map((name) => {
+            const cardFile = path.join(ROOT, 'roles', name + '.md');
+            let cardBytes = 0;
+            let cardLines = 0;
+            try {
+              const raw = fs.readFileSync(cardFile, 'utf8');
+              cardBytes = Buffer.byteLength(raw);
+              cardLines = raw.split('\n').length;
+            } catch {}
+            let sessions = 0;
+            let conversations = 0;
+            let topics = 0;
+            let thoughts = 0;
+            let impressions = 0;
+            let stateBytes = 0;
+            let lastModified = 0;
+            const sFile = roleStateFile(name);
+            const vFile = roleSocialFile(name);
+            try {
+              const s = readJsonSafe(sFile, null);
+              sessions = Object.keys(s?.sessions ?? {}).length;
+              if (fs.existsSync(sFile)) lastModified = Math.max(lastModified, fs.statSync(sFile).mtimeMs);
+            } catch {}
+            try {
+              const v = readJsonSafe(vFile, null);
+              const convs = v?.conversations ?? {};
+              conversations = Object.keys(convs).length;
+              for (const conv of Object.values(convs)) {
+                topics += Array.isArray(conv?.activeTopics) ? conv.activeTopics.length : 0;
+                thoughts += Array.isArray(conv?.pendingThoughts) ? conv.pendingThoughts.length : 0;
+                impressions += Object.keys(conv?.memberImpressions ?? {}).length;
+              }
+              if (fs.existsSync(vFile)) {
+                stateBytes = fs.statSync(vFile).size;
+                lastModified = Math.max(lastModified, fs.statSync(vFile).mtimeMs);
+              }
+            } catch {}
+            return { name, isCurrent: name === currentName, cardBytes, cardLines, sessions, conversations, topics, thoughts, impressions, stateBytes, lastModified };
+          });
+          sendJson({ ok: true, current: currentName, roles });
+          return;
+        }
+        // 读单个角色卡内容
+        if (req.method === 'GET' && url.pathname === '/api/roles/content') {
+          const name = sanitizeRoleName(url.searchParams.get('name') ?? '');
+          if (!name) { sendJson({ ok: false, error: '角色名不能为空' }, 400); return; }
+          const file = path.join(ROOT, 'roles', name + '.md');
+          if (!fs.existsSync(file)) { sendJson({ ok: false, error: `角色「${name}」不存在` }, 404); return; }
+          sendJson({ ok: true, name, content: fs.readFileSync(file, 'utf8') });
+          return;
+        }
+        // 保存角色卡内容（改前自动备份，改完靠 mtime 让角色提示缓存失效）
+        if (req.method === 'POST' && url.pathname === '/api/roles/content') {
+          const body = await readBody();
+          const name = sanitizeRoleName(body.name ?? '');
+          const content = String(body.content ?? '');
+          if (!name) { sendJson({ ok: false, error: '角色名不能为空' }, 400); return; }
+          if (!content.trim()) { sendJson({ ok: false, error: '角色卡内容不能为空' }, 400); return; }
+          const file = path.join(ROOT, 'roles', name + '.md');
+          if (!fs.existsSync(file)) { sendJson({ ok: false, error: `角色「${name}」不存在` }, 404); return; }
+          try {
+            const backup = `${file}.bak-${Date.now()}`;
+            fs.copyFileSync(file, backup);
+            fs.writeFileSync(file, content);
+            log(`控制台：角色卡已保存 ${name}（${content.length} 字，备份 ${path.basename(backup)}）`);
+            sendJson({ ok: true, name, bytes: Buffer.byteLength(content), backup: path.basename(backup) });
+          } catch (error) {
+            sendJson({ ok: false, error: `保存失败：${error?.message ?? error}` }, 500);
+          }
+          return;
+        }
         if (req.method === 'POST' && url.pathname === '/api/roles/create') {
           const body = await readBody();
           const name = sanitizeRoleName(body.name);
@@ -3439,6 +3527,17 @@ async function main() {
           return;
         }
 
+        // 角色管理面板（2026-10-31）：独立页面，和调音台一样直出静态 HTML，令牌在页面内处理。
+        if (req.method === 'GET' && (url.pathname === '/roles' || url.pathname === '/roles.html')) {
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', ...SECURITY_HEADERS });
+          try {
+            res.end(fs.readFileSync(path.join(ROOT, 'public', 'roles.html'), 'utf8'));
+          } catch {
+            res.end('角色管理页面缺失：qq-bridge/public/roles.html');
+          }
+          return;
+        }
+
         if (req.method === 'GET' && url.pathname === '/api/video') {
           const onDisk = readJsonSafe(path.join(ROOT, 'config.json'), {}, true);
           const v = { ...(onDisk.video ?? {}) };
@@ -3966,7 +4065,7 @@ async function main() {
           markReadCalledKeys.clear();
           wakeConfigMissCount.clear();
           socialV2.paused = false;
-          try { atomicWriteJson(SOCIAL_V2_FILE, { conversations: {} }); } catch (error) { log('重置二代状态：写空状态文件失败:', error?.message ?? error); }
+          try { atomicWriteJson(roleSocialFile(activeRole), { conversations: {} }); } catch (error) { log('重置二代状态：写空状态文件失败:', error?.message ?? error); }
           log('控制台：二代 AI 状态已重置（会话、定时器、唤醒配置已清空，工具日志保留）');
           sendJson({ ok: true });
           return;
@@ -7729,7 +7828,7 @@ async function main() {
 
   function loadSocialV2State() {
     try {
-      const raw = readJsonSafe(SOCIAL_V2_FILE, null);
+      const raw = readJsonSafe(roleSocialFile(activeRole), null);
       socialV2.paused = raw?.paused === true;
       if (raw && typeof raw.conversations === 'object') {
         const seenTokens = new Set();
@@ -7827,7 +7926,8 @@ async function main() {
     }
   }
 
-  function saveSocialV2State() {
+  // role 参数同上：切角色时要把旧状态写回旧角色的文件。
+  function saveSocialV2State(role = activeRole) {
     try {
       const obj = { paused: socialV2.paused, conversations: Object.create(null) };
       for (const [key, st] of socialV2.conversations) {
@@ -7881,7 +7981,7 @@ async function main() {
           seenForwardIds: Array.from(seenForwardIds.get(key) || []).slice(-1000)
         };
       }
-      atomicWriteJson(SOCIAL_V2_FILE, obj);
+      atomicWriteJson(roleSocialFile(role), obj);
     } catch (error) {
       log('保存 socialV2 状态失败:', error?.message ?? error);
     }
@@ -8108,6 +8208,60 @@ async function main() {
   }
 
   loadSocialV2State();
+
+  // ── 切角色 = 换脑子 ──────────────────────────────────────────────────────
+  // 每个角色一套独立的 sessions.<角色>.json / social-v2.<角色>.json。
+  // 切过去时：旧状态落盘 → 清掉旧角色的定时器 → 清空内存 → 加载新角色的状态。
+  // 这样新角色不记得另一个人格跟谁聊过什么，记忆、唤醒配置、会话全部隔离。
+  // 切角色前把"跨角色共享"的运行态清干净。
+  // 2026-10-31 踩过：只清 per-conversation 的定时器不够 —— promptQueues / turnLeaseDeadline /
+  // collectors / pendingWakeKeys 都是全局结构，切完角色后旧 key 还挂着，
+  // 表现就是"投递一直排队、忙标记释放不掉、连 owner 的指令都不回"。
+  function clearRoleTimers() {
+    for (const st of socialV2.conversations.values()) {
+      for (const field of ['pendingWakeTimer', 'sleepTimer', 'replyCheckTimer', 'proactiveTimer']) {
+        if (st[field]) { try { clearTimeout(st[field]); } catch {} st[field] = null; }
+      }
+    }
+    // 现成的全局清理：定时器 + pendingWakeKeys + wakeConfigUpdatedKeys 等标记
+    try { clearAllSocialV2Timers(); } catch (error) { log(`[role] 清理会话定时器失败：${error?.message ?? error}`); }
+    // 投递队列：不 reject 掉会让排队中的 promise 永远悬着
+    try { drainAllPromptQueues('角色切换，已取消排队中的投递'); } catch (error) { log(`[role] 清空投递队列失败：${error?.message ?? error}`); }
+    // 唤醒租约与回合租约
+    for (const timer of pendingWakeLeaseTimers.values()) { try { clearTimeout(timer); } catch {} }
+    pendingWakeLeaseTimers.clear();
+    pendingWakeArmedAt.clear();
+    pendingWakeKeys.clear();
+    turnLeaseDeadline.clear();
+    // 回合收集器 / 回合开始标记（按 DSH sessionId 存的）
+    collectors.clear();
+    v2TurnStartAt.clear();
+    sendToolSucceededSessions.clear();
+    pendingSendToolCalls.clear();
+    if (social?.loopTimer) { try { clearTimeout(social.loopTimer); } catch {} social.loopTimer = null; }
+    if (social?.pendingTimers) {
+      for (const set of social.pendingTimers.values()) {
+        for (const timer of set) { try { clearTimeout(timer); } catch {} }
+      }
+      social.pendingTimers.clear();
+    }
+  }
+
+  roleSwitchHook = (prevRole, nextRole) => {
+    // 显式传 prevRole：此刻 activeRole 已经是 nextRole 了，不传会把旧数据写进新角色的文件。
+    try { saveState(prevRole); } catch (error) { log(`[role] 保存旧会话映射失败：${error?.message ?? error}`); }
+    try { saveSocialV2State(prevRole); } catch (error) { log(`[role] 保存旧社交状态失败：${error?.message ?? error}`); }
+    clearRoleTimers();
+    state = { sessions: {}, sessionPolicies: {} };
+    socialV2.conversations.clear();
+    socialV2.paused = false;
+    loadState();
+    loadSocialV2State();
+    const from = prevRole || '(无角色)';
+    const to = nextRole || '(无角色)';
+    log(`[role] 已切换状态：${from} → ${to}（${roleStateFile(nextRole)} / ${roleSocialFile(nextRole)}）`);
+    appendActivity(`[role] 切换角色状态：${from} → ${to}`);
+  };
 
   function isSocialEnabled() {
     return currentMode === 'reserved' && cfg.social?.enabled !== false;
