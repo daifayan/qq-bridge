@@ -239,6 +239,27 @@ const SCOPE_LABEL = { owner: '只对老大', private: '所有私聊', off: '谁�
 
 const clamp = (v, min, max) => Math.min(max, Math.max(min, v))
 
+/**
+ * 网页控制台「语音调音台」的地址，顺手把令牌带上。
+ *
+ * 为什么带令牌：控制台的每个接口都要 x-console-token / ?token=，
+ * 不带的话打开就是 401 页面。令牌来源跟桥接一致：
+ *   1) config.consoleToken（手配的）
+ *   2) state/console-token（桥接没配时自动生成的那份）
+ * 两个都没有就返回不带令牌的地址 —— 页面会自己提示，比给个错链接强。
+ */
+export function voiceLabUrl(cfg = readConfig()) {
+  const port = Number(cfg.consolePort) || 3100
+  const base = `http://127.0.0.1:${port}/voice-lab`
+  let token = String(cfg.consoleToken ?? '').trim()
+  if (!token) {
+    try {
+      token = fs.readFileSync(path.join(ROOT, 'state', 'console-token'), 'utf8').trim()
+    } catch {}
+  }
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base
+}
+
 /** 只暴露前端能改的字段，其余原样保留 */
 export function describeVoice() {
   const cfg = readConfig()
@@ -263,6 +284,7 @@ export function describeVoice() {
     speed: Number(local.speed) || 1,
     sid: Number(local.sid) || 0,
     modelDir: String(local.modelDir || ''),
+    labUrl: voiceLabUrl(cfg),
   }
 }
 

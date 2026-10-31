@@ -66,6 +66,23 @@
       "queryTemplate": "text={text}",
       "headers": {},
       "extraBody": {}
+    },
+    "tone": {
+      "enabled": true,
+      "pitch": 0,
+      "gain": 1,
+      "emotion": {
+        "on": true,
+        "calm": { "pitch": -0.6, "speed": 0.97 },
+        "normal": { "pitch": 0, "speed": 1 },
+        "soft": { "pitch": 1.2, "speed": 1.02 }
+      },
+      "clips": {
+        "on": false,
+        "chance": 0.25,
+        "gapMs": 90,
+        "list": ["诶嘿", "唔…", "嗯？", "啊这"]
+      }
     }
   },
   "slang": {

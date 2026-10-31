@@ -354,6 +354,16 @@
   .dbtn.primary:hover { background: rgba(79,140,255,.28); }
   .dbtn:disabled { opacity: .45; cursor: not-allowed; }
 
+  /* 跳到网页控制台的调音台（新窗口，令牌由启动器拼好） */
+  .lablink {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 7px 14px; border-radius: 9px; font-size: 12.5px;
+    background: rgba(79,140,255,.18); border: 1px solid rgba(79,140,255,.5);
+    color: #cfe0ff; text-decoration: none; white-space: nowrap;
+    transition: all .15s ease;
+  }
+  .lablink:hover { background: rgba(79,140,255,.28); color: #e6efff; }
+
   /* ---------------------------------------------------------- 设置面板 */
   .sheet {
     width: 640px;
@@ -1433,6 +1443,14 @@ function renderVoiceForm(v) {
       <div class="ctl">
         <input type="range" id="v-speed" min="50" max="200" step="5" value="${Math.round(v.speed * 100)}">
         <span class="val" id="v-speed-val">${v.speed.toFixed(2)}x</span>
+      </div>
+    </div>
+
+    <div class="frow">
+      <div class="lbl">音色微调</div>
+      <div class="ctl">
+        <a class="lablink" href="${v.labUrl || 'http://127.0.0.1:3100/voice-lab'}" target="_blank" rel="noreferrer">打开调音台 ↗</a>
+        <span class="unit">音调 / 情绪映射 / 语气词 · 带试听 · 保存即生效</span>
       </div>
     </div>
   `;
