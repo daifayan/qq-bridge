@@ -35,11 +35,14 @@ QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──�
 - **QQ 侧**：`@snowluma/sdk` 的 `SnowLumaWebSocketClient`（OneBot v11 WebSocket 客户端，自动重连）
 - **DSH 侧**：适配 DSH 0.1.2 起、0.1.5 复核通过的协议——launch token 换 Cookie 鉴权、`/api/<namespace>/<method>` 斜杠 RPC、`/api/remote.mux` + `session/follow` 事件流；复用 `AbstractApiClient` 传输层但不再依赖旧版 zod value schema。会话模型由桥接按 `config.json` 的 `dsh.model` 逐会话 `session.selectModel` 固定（默认 `deepseek-flash` = DeepSeek-V41-Flash，多模态）
 - **agent 自主收发 QQ**：DSH 的 MCP 客户端（`~/.dsh/profiles/web/cordis.patch.yml` 配置）接入三个 MCP server：
-  - `snowluma`（桥接自带 `src/mcp-snowluma-safe.js`）：QQ 动作**安全子集**（查状态/查群/查消息/发消息，发送强制白名单；发送工具支持可选 `replyToMessageId` 引用回复）
+  - `snowluma`（桥接自带 `src/mcp-snowluma-safe.js`）：QQ 动作**安全子集**（查状态/查群/查消息/发消息/发语音，发送强制白名单；发送工具支持可选 `replyToMessageId` 引用回复；`qq_update_self_profile` 让 AI 记录"观察到的自己"）
   - `snowluma-host`（桥接自带 `src/mcp-host-server.js`）：`snowluma_status`（默认只读探活）；`start_snowluma` / `stop_snowluma` 需显式开启 `snowluma.allowProcessControl: true` 且仅在 `closed-agent` 模式可用
   - `web-search-safe`（桥接自带 `src/mcp-web-search-safe.js`）：只读 `web_search` / `web_fetch`（带 SSRF 防护），供 agent 查网络用语/资料
 - **会话模型**：每个 QQ 会话（私聊/群）对应一个独立的 DSH 会话，统一归组到「QQ 聊天」工作区（不再散落未分组）；映射持久化在 `state/sessions.json`
 - **性格定制**：QQ 会话默认使用 `qq-chat` agent preset（`~/.dsh/.agent-presets/qq-chat/agent.cordis.yml`），`reserved2` 使用 `qq-chat-v2`（`~/.dsh/.agent-presets/qq-chat-v2/agent.cordis.yml`）；人格与默认 DSH 一致（coding agent），仅附加 QQ 场景规则；**角色扮演**是可选机制——由控制台或管理端设置 `state/current-role.json` 注入（群友无法更改）
+  - **切角色 = 换脑子**：每个角色一套独立的 `state/sessions.<角色>.json` / `state/social-v2.<角色>.json` / `state/self-profile.<角色>.md`，切换时不共享会话映射、社交状态和待办；无角色时退回无后缀的旧文件，老数据照常可用
+  - **角色管理页** `http://127.0.0.1:<consolePort>/roles`：看每个角色的卡大小、会话/话题/印象数与状态文件体积，直接在页面上改角色卡（保存前自动备份成 `.bak-<时间戳>`）
+  - **自我画像（L2）**：角色卡（L0）是管理员定的、AI 只读；`state/self-profile.<角色>.md` 是 AI 自己写"我发现自己是什么样"的地方，只增不删，注入排在角色卡之后，与角色卡冲突时以角色卡为准
 - **本地控制台**：桥接自带 Web 控制台 `http://127.0.0.1:3100`——切换运行模式（chat / closed-agent / reserved / reserved2）、设置角色、静默开关、查看活动日志、修改管理员/控制台令牌，全部即时生效；访问需要令牌（`config.json` 的 `consoleToken`，未配置时自动生成并打印在启动日志；控制台内可手动修改或重新生成）
 - **运行模式**：
   - `chat`：白名单群 + 白名单私聊 → qq-chat 安全聊天
@@ -139,6 +142,14 @@ node scripts/preview-tone.mjs "你好呀" --pitch 2 --speed 1.05
 
 界面上：控制台「11 语音设置」和启动器语音面板底部都有「打开语音调音台」入口（启动器会把控制台令牌拼进地址，点开即用），
 也可以直接访问 `http://127.0.0.1:<consolePort>/voice-lab`（要带控制台令牌）。左边试听、右边调参，拖动滑杆自动试听，`Ctrl/⌘+Enter` 试听、`Ctrl/⌘+S` 保存。
+
+#### 让模型自己决定发语音（2026-10-31）
+
+上面那套是**桥接掷骰**决定要不要补语音。另外模型也可以自己调 `qq_send_voice` 主动发一条：
+
+- **只跳过掷骰，不跳过规矩**：`rand` 恒 0 表示"模型要发就发"，但冷却、每小时/每日上限、字数、静音时段、目标范围检查全部复用 `voice-policy.js` 的同一套判定 —— 超了直接返回原因，模型该改发文字。
+- **不会语音+文字双份**：用语音替代文字时那条计入 `sent` 并标 `voiced`；紧接着的 `qq_send_message` 若与 60s 内刚说过的语音内容重复，直接 409 拒掉。
+- **开关**：`socialV2.tools.sendVoice: false` 可关掉这个工具；`voice.enabled: false` 时接口整体不可用。
 
 快速验证（不依赖真实聊天）：
 
@@ -294,6 +305,7 @@ qq-bridge/
     config-ops.mjs      # 配置读写层：读 → 校验 → 备份 → 写 → 重启桥接
   plugins/qq-mode-console  # DSH 插件：注册 qq-mode 设置命名空间（仅 host 半，UI 卡片未实现）
   public/console.html   # 桥接控制台网页（3100，可被 launcher 用 iframe 内嵌）
+  public/roles.html     # 角色管理页（/roles）：角色卡大小、状态统计、在线改卡
   src/
     bridge.js           # 主程序
     dsh-client.js       # Node 版 DSH API 客户端（WS 下行）
