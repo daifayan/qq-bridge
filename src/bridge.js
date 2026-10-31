@@ -7217,25 +7217,49 @@ async function main() {
       //   1) workspace + agentPreset —— 正常路径；
       //   2) workspace 无 preset     —— 仅 closed-agent 允许的降级（那里本就是完整工具面）；
       //      群聊模式绝不走这一步：DSH 会给「无 preset 会话」套上默认 preset（standard）。
+      // 遇到底层插件尚未就绪时退避重试。
+      // 背景（2026-10-31 实测）：桌面端启动要加载 11 个全局插件（含 3 个 MCP client），
+      // 耗时从 10s 一路涨到 33s；preset 内插件 qq-tool-restrict 声明 inject ['tools']，
+      // tools 服务没就绪就会被判 "never started"，sessions.create 直接失败。
+      // 以前这里一抛错就放弃 → 唤醒投递失败 → QQ 消息送不出去（用户侧看着像"机器人没反应/识别错误"）。
+      // 只对「插件未就绪」这类瞬时错误重试；真正的配置错误重试也没用，交给上层报错。
+      const PRESET_NOT_READY_RE = /never started|still waiting for|plugin entries/i;
+      const CREATE_RETRY_DELAYS = [2000, 5000, 10000, 15000]; // 累计约 32s，覆盖插件加载窗口
       for (const withPreset of strictPreset ? [true] : [true, false]) {
-        try {
-          const wsValue = unwrap(await api.workspace.create({ path: dir }), 'workspace.create');
-          if (wsValue.created && cfg.workspaceTitle) {
-            await api.workspace.rename({ workspaceId: wsValue.workspace.workspaceId, title: cfg.workspaceTitle });
+        const maxAttempt = withPreset && preset ? CREATE_RETRY_DELAYS.length + 1 : 1;
+        for (let attempt = 1; attempt <= maxAttempt; attempt += 1) {
+          try {
+            const wsValue = unwrap(await api.workspace.create({ path: dir }), 'workspace.create');
+            if (wsValue.created && cfg.workspaceTitle) {
+              await api.workspace.rename({ workspaceId: wsValue.workspace.workspaceId, title: cfg.workspaceTitle });
+            }
+            const params = { workspaceId: wsValue.workspace.workspaceId };
+            if (withPreset && preset) params.agentPreset = preset;
+            const value = unwrap(await api.sessions.create(params), 'session.create');
+            sessionId = value.sessionId;
+            if (withPreset && preset) {
+              log(attempt > 1
+                ? `会话 ${key} 已挂载 preset ${preset}（第 ${attempt} 次尝试成功，前 ${attempt - 1} 次插件未就绪）`
+                : `会话 ${key} 已挂载 preset ${preset}`);
+            } else if (preset) {
+              log(`⚠️ 会话 ${key} 未能挂载 preset ${preset}（${lastError?.message ?? '未知原因'}），已降级为无 preset 会话；请检查 ~/.dsh/.agent-presets/${preset} 后重启 DSH`);
+            }
+            break;
+          } catch (error) {
+            lastError = error;
+            const message = String(error?.message ?? error);
+            const retryable = withPreset && Boolean(preset) && PRESET_NOT_READY_RE.test(message);
+            if (!retryable || attempt >= maxAttempt) break;
+            const delay = CREATE_RETRY_DELAYS[attempt - 1];
+            log(`会话 ${key} 创建失败（preset ${preset} 插件未就绪）：${message}；${delay}ms 后重试（第 ${attempt}/${maxAttempt - 1} 次）`);
+            await sleep(delay);
+            // 重试等待期间可能被 reset / 权限变化，及时放弃，避免复活旧会话
+            if (epoch !== sessionEpoch || policy !== sessionPolicy(key) || !isSessionAllowedInCurrentMode(key)) {
+              throw new Error('会话创建期间已重置或权限已变化，放弃重试');
+            }
           }
-          const params = { workspaceId: wsValue.workspace.workspaceId };
-          if (withPreset && preset) params.agentPreset = preset;
-          const value = unwrap(await api.sessions.create(params), 'session.create');
-          sessionId = value.sessionId;
-          if (withPreset && preset) {
-            log(`会话 ${key} 已挂载 preset ${preset}`);
-          } else if (preset) {
-            log(`⚠️ 会话 ${key} 未能挂载 preset ${preset}（${lastError?.message ?? '未知原因'}），已降级为无 preset 会话；请检查 ~/.dsh/.agent-presets/${preset} 后重启 DSH`);
-          }
-          break;
-        } catch (error) {
-          lastError = error;
         }
+        if (sessionId) break;
       }
       if (!sessionId) {
         throw new Error(`无法为 ${key} 创建 DSH 会话（模式 ${currentMode}，preset ${preset ?? '无'}）：${lastError?.message ?? '未知原因'}。已拒绝退化为 DSH 默认 preset 会话——那会把本地工具暴露给 QQ 群。`);
