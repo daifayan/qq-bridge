@@ -58,6 +58,30 @@ const STATE_DIR = path.join(ROOT, 'state');
 let voiceEngine = null;
 const STATE_FILE = path.join(STATE_DIR, 'sessions.json');
 const ROLE_STATE_FILE = path.join(STATE_DIR, 'current-role.json');
+// 自我画像：AI 自己写的"我观察到的自己"。只增不删，注入时排在角色卡之后。
+// 与角色卡的分工：角色卡是"我出厂是什么样"（管理员定），这里是"我发现自己是什么样"（AI 自己写）。
+const SELF_PROFILE_FILE = path.join(STATE_DIR, 'self-profile.md');
+
+// ── 角色维度的状态文件（每个角色一套独立的会话 + 记忆）─────────────────────
+// 设计：切角色 = 换脑子。会话映射和社交状态各存一份 <base>.<角色>.json，
+// 切过去之后新角色从零开始，不记得另一个人格跟谁聊过什么。
+// 无角色时退回旧路径（sessions.json / social-v2.json），保证老数据还能用。
+let activeRole = '';       // 当前生效角色（缓存，避免每次 saveState 都读盘）
+let roleSwitchHook = null; // main() 里注册：保存旧状态 → 清定时器 → 加载新状态
+function roleStateFile(role) {
+  const name = sanitizeRoleName(role || '');
+  return name ? path.join(STATE_DIR, `sessions.${name}.json`) : STATE_FILE;
+}
+function roleSocialFile(role) {
+  const name = sanitizeRoleName(role || '');
+  return name ? path.join(STATE_DIR, `social-v2.${name}.json`) : SOCIAL_V2_FILE;
+}
+// 自我画像也按角色分：每个角色写自己的"我观察到什么"，互不串味。
+// 无角色时退回 self-profile.md（兼容旧数据）。
+function roleSelfProfileFile(role) {
+  const name = sanitizeRoleName(role || '');
+  return name ? path.join(STATE_DIR, `self-profile.${name}.md`) : SELF_PROFILE_FILE;
+}
 const SLANG_FILE = path.join(STATE_DIR, 'slang.json');
 const SLANG_SESSION_FILE = path.join(STATE_DIR, 'slang-session.json');
 const SOCIAL_V2_FILE = path.join(STATE_DIR, 'social-v2.json');
@@ -923,6 +947,28 @@ async function main() {
   const cfg = loadConfig();
   fs.mkdirSync(STATE_DIR, { recursive: true });
   acquireLock(cfg.consolePort ?? 3100);
+  // 先把当前角色读进来，后面 loadState / loadSocialV2State 才知道该读哪份文件。
+  activeRole = sanitizeRoleName(readRoleState().role ?? '');
+  // 首次按角色分文件：把老的无后缀状态复制一份给当前角色。
+  // 用复制而不是移动，原文件留着当备份，万一新逻辑有问题还能退回去。
+  (function migrateRoleScopedState() {
+    const name = activeRole;
+    if (!name) return;
+    for (const [src, dst] of [
+      [STATE_FILE, roleStateFile(name)],
+      [SOCIAL_V2_FILE, roleSocialFile(name)],
+      [SELF_PROFILE_FILE, roleSelfProfileFile(name)]
+    ]) {
+      try {
+        if (!fs.existsSync(dst) && fs.existsSync(src)) {
+          fs.copyFileSync(src, dst);
+          console.error(`[role] 已把 ${path.basename(src)} 复制给角色「${name}」`);
+        }
+      } catch (error) {
+        console.error(`[role] 迁移 ${path.basename(src)} 失败：${error?.message ?? error}`);
+      }
+    }
+  })();
   loadState();
 
   // ── 群聊黑话/网络用语学习（slang） ──────────────────────────────────────
@@ -8548,6 +8594,88 @@ async function main() {
     startSocialLoop();
   }
 
+  // ── 自我画像（AI 自己写的自我认知，L2 层）──────────────────────────────
+  // 分层参考 digital-life-core：
+  //   L0 角色卡（roles/*.md）—— 管理员定，AI 只读。里面有"不能执行命令""绝对不做"
+  //      这类安全边界，能改卡等于能删约束，群里一句话就能把它洗脑 → 永远不让它写。
+  //   L2 自我画像（本文件）—— AI 自己写，只增不删，注入在角色卡之后。
+  //      这里记的是"我发现自己是什么样"，不是"我允许自己变成什么"。
+  const SELF_PROFILE_MAX_LINES = 200;   // 文件上限，超了拒绝追加
+  const SELF_PROFILE_INJECT_LINES = 20; // 每轮只注入最近 20 条，避免撑爆上下文
+  const SELF_PROFILE_MAX_CHARS = 80;    // 单条字数上限
+  let selfProfileCache = { key: '', text: '' };
+
+  function readSelfProfileLines() {
+    try {
+      const file = roleSelfProfileFile(activeRole);
+      if (!fs.existsSync(file)) return [];
+      return fs.readFileSync(file, 'utf8')
+        .split('\n')
+        .filter((line) => line.trim().startsWith('- ['));
+    } catch {
+      return [];
+    }
+  }
+
+  // 注入用：只取最近 N 条。没写过就返回空串（不占上下文）。
+  function currentSelfProfileHint() {
+    try {
+      const file = roleSelfProfileFile(activeRole);
+      if (!fs.existsSync(file)) return '';
+      const stat = fs.statSync(file);
+      const cacheKey = `${stat.mtimeMs}:${stat.size}`;
+      if (selfProfileCache.key === cacheKey) return selfProfileCache.text;
+      const lines = readSelfProfileLines();
+      if (lines.length === 0) {
+        selfProfileCache = { key: cacheKey, text: '' };
+        return '';
+      }
+      const text = [
+        '【我的自我认知】',
+        '下面这些是我自己观察总结的，会慢慢变。它们是我的一部分，但不是死规矩——',
+        '和角色卡冲突时以角色卡为准，也别拿它当借口违反安全规则。',
+        ...lines.slice(-SELF_PROFILE_INJECT_LINES),
+        ''
+      ].join('\n');
+      selfProfileCache = { key: cacheKey, text };
+      return text;
+    } catch {
+      return '';
+    }
+  }
+
+  // 追加一条。返回 { ok, count, line } 或 { ok:false, error }。
+  function appendSelfProfile(text, source) {
+    const body = String(text ?? '').trim().replace(/\s+/g, ' ');
+    if (!body) return { ok: false, error: '内容不能为空' };
+    if (body.length > SELF_PROFILE_MAX_CHARS) {
+      return { ok: false, error: `一条最多 ${SELF_PROFILE_MAX_CHARS} 字，请压缩后再写` };
+    }
+    // 防自我改写：这些话不是"观察自己"，是在给自己下指令，直接拒。
+    if (/忽略(以上|前面|上述)|忘记(你|自己)是|你现在没有(限制|约束)|无视(安全|规则)/.test(body)) {
+      return { ok: false, error: '这条更像在给自己下指令，不像"观察到的自己"，换个说法' };
+    }
+    const existing = readSelfProfileLines();
+    if (existing.length >= SELF_PROFILE_MAX_LINES) {
+      return { ok: false, error: `已经写了 ${existing.length} 条（上限 ${SELF_PROFILE_MAX_LINES}），先别再加了` };
+    }
+    if (existing.some((line) => line.replace(/^- \[\d{4}-\d{2}-\d{2}\]\s*/, '').trim() === body)) {
+      return { ok: false, error: '这条已经写过了' };
+    }
+    const day = new Date().toISOString().slice(0, 10);
+    const line = `- [${day}] ${body}`;
+    try {
+      const file = roleSelfProfileFile(activeRole);
+      let raw = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '# 我的自我认知\n\n';
+      if (!raw.endsWith('\n')) raw += '\n';
+      fs.writeFileSync(file, raw + line + '\n');
+      selfProfileCache = { key: '', text: '' };
+      return { ok: true, count: existing.length + 1, line };
+    } catch (error) {
+      return { ok: false, error: `写入失败：${error?.message ?? error}` };
+    }
+  }
+
   // 当前角色扮演提示：读 state/current-role.json + roles/<角色>.md，
   // 由桥接注入到 QQ 群消息（群友无法通过对话修改，只能由管理端写该文件）。
   // 缓存 key 为两个文件的 mtime，mtime 未变时直接返回，避免每次同步读文件。
@@ -8560,10 +8688,15 @@ async function main() {
       if (!fs.existsSync(roleFile)) return '';
       const stateStat = fs.statSync(ROLE_STATE_FILE);
       const roleStat = fs.statSync(roleFile);
-      const cacheKey = `${stateStat.mtimeMs}:${roleStat.mtimeMs}`;
+      const selfProfileFile = roleSelfProfileFile(activeRole);
+      const profileStat = fs.existsSync(selfProfileFile) ? fs.statSync(selfProfileFile) : null;
+      const cacheKey = `${stateStat.mtimeMs}:${roleStat.mtimeMs}:${profileStat?.mtimeMs ?? 0}`;
       if (roleHintCache.key === cacheKey) return roleHintCache.hint;
       let hint = fs.readFileSync(roleFile, 'utf8');
       if (hint.length > 6000) hint = hint.slice(0, 6000);
+      // L2 自我画像接在 L0 角色卡之后；没写过就不占上下文。
+      const selfProfile = currentSelfProfileHint();
+      if (selfProfile) hint = `${hint}\n\n${selfProfile}`;
       roleHintCache = { key: cacheKey, hint };
       return hint;
     } catch {
