@@ -58,6 +58,30 @@ const STATE_DIR = path.join(ROOT, 'state');
 let voiceEngine = null;
 const STATE_FILE = path.join(STATE_DIR, 'sessions.json');
 const ROLE_STATE_FILE = path.join(STATE_DIR, 'current-role.json');
+// 自我画像：AI 自己写的"我观察到的自己"。只增不删，注入时排在角色卡之后。
+// 与角色卡的分工：角色卡是"我出厂是什么样"（管理员定），这里是"我发现自己是什么样"（AI 自己写）。
+const SELF_PROFILE_FILE = path.join(STATE_DIR, 'self-profile.md');
+
+// ── 角色维度的状态文件（每个角色一套独立的会话 + 记忆）─────────────────────
+// 设计：切角色 = 换脑子。会话映射和社交状态各存一份 <base>.<角色>.json，
+// 切过去之后新角色从零开始，不记得另一个人格跟谁聊过什么。
+// 无角色时退回旧路径（sessions.json / social-v2.json），保证老数据还能用。
+let activeRole = '';       // 当前生效角色（缓存，避免每次 saveState 都读盘）
+let roleSwitchHook = null; // main() 里注册：保存旧状态 → 清定时器 → 加载新状态
+function roleStateFile(role) {
+  const name = sanitizeRoleName(role || '');
+  return name ? path.join(STATE_DIR, `sessions.${name}.json`) : STATE_FILE;
+}
+function roleSocialFile(role) {
+  const name = sanitizeRoleName(role || '');
+  return name ? path.join(STATE_DIR, `social-v2.${name}.json`) : SOCIAL_V2_FILE;
+}
+// 自我画像也按角色分：每个角色写自己的"我观察到什么"，互不串味。
+// 无角色时退回 self-profile.md（兼容旧数据）。
+function roleSelfProfileFile(role) {
+  const name = sanitizeRoleName(role || '');
+  return name ? path.join(STATE_DIR, `self-profile.${name}.md`) : SELF_PROFILE_FILE;
+}
 const SLANG_FILE = path.join(STATE_DIR, 'slang.json');
 const SLANG_SESSION_FILE = path.join(STATE_DIR, 'slang-session.json');
 const SOCIAL_V2_FILE = path.join(STATE_DIR, 'social-v2.json');
@@ -210,7 +234,17 @@ function readRoleState() {
   return readJsonSafe(ROLE_STATE_FILE, { role: null, mode: 'active' });
 }
 function writeRoleState(role, mode) {
+  const prevRole = activeRole;
   atomicWriteJson(ROLE_STATE_FILE, { role: role ?? null, mode: mode ?? 'active' });
+  activeRole = sanitizeRoleName(role ?? '');
+  // 角色真的变了才"换脑子"（静默/恢复只改 mode，不该重载状态）。
+  if (prevRole !== activeRole && typeof roleSwitchHook === 'function') {
+    try {
+      roleSwitchHook(prevRole, activeRole);
+    } catch (error) {
+      console.error(`[role] 切换角色状态失败（${prevRole || '无'} → ${activeRole || '无'}）：${error?.message ?? error}`);
+    }
+  }
 }
 function sanitizeRoleName(name) {
   return String(name ?? '').replace(/[^\w\u4e00-\u9fff-]/g, '');
@@ -628,16 +662,19 @@ function loadConfig() {
 // ── 状态持久化（QQ 会话 ↔ DSH 会话映射） ─────────────────────────────────────
 let state = { sessions: {} };
 function loadState() {
-  const loaded = readJsonSafe(STATE_FILE, null);
+  const loaded = readJsonSafe(roleStateFile(activeRole), null);
   if (loaded && loaded.sessions && typeof loaded.sessions === 'object') state = loaded;
   else state = { sessions: {} };
   if (!state.sessionPolicies || typeof state.sessionPolicies !== 'object' || Array.isArray(state.sessionPolicies)) state.sessionPolicies = {};
 }
-function saveState() {
+// role 参数用于切角色时"把旧状态存回旧角色的文件"——此时 activeRole 已经指向新角色了，
+// 不显式传就会把旧数据写进新角色的文件（2026-10-31 踩过）。
+function saveState(role = activeRole) {
   fs.mkdirSync(STATE_DIR, { recursive: true });
-  const tmp = STATE_FILE + '.tmp';
+  const file = roleStateFile(role);
+  const tmp = file + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
-  fs.renameSync(tmp, STATE_FILE);
+  fs.renameSync(tmp, file);
 }
 
 // ── 单实例锁 ─────────────────────────────────────────────────────────────────
@@ -806,7 +843,15 @@ async function segmentsToText(segments, options = {}) {
         break;
       }
       case 'face': out.push(`[表情${d.id ?? ''}]`); break;
-      case 'image': out.push('[图片]'); break;
+      case 'image': {
+        // 视频被报成 image 段时（见 extractMediaFromSegments 的注释），文本也要标成 [视频]，
+        // 否则模型以为收到的是图片，压根不会去调分镜。
+        const f = String(d.file ?? '');
+        const u = String(d.url ?? '');
+        const isVid = /\.(mp4|mov|avi|mkv|webm|flv|m4v|3gp)(\?|#|$)/i.test(f) || /orgfmt=t264|videotype=/i.test(u);
+        out.push(isVid ? '[视频]' : '[图片]');
+        break;
+      }
       case 'record': out.push('[语音]'); break;
       case 'video': out.push('[视频]'); break;
       case 'file': out.push(`[文件${d.name ?? ''}]`); break;
@@ -848,27 +893,39 @@ function extractMediaFromSegments(segments) {
   for (const seg of segments ?? []) {
     if (!seg || typeof seg !== 'object') continue;
     const d = seg.data ?? {};
-    if (seg.type === 'image') {
-      media.push({
-        kind: 'image',
-        file: String(d.file ?? ''),
-        url: String(d.url ?? ''),
-        subType: d.subType != null ? String(d.subType) : '',
-        summary: String(d.summary ?? '')
-      });
+    if (seg.type === 'image' || seg.type === 'video') {
+      const file = String(d.file ?? '');
+      const url = String(d.url ?? '');
+      // 不能只看 seg.type：有些 OneBot 实现（含 SnowLuma 的部分版本）把视频报成 image 段，
+      // file 是 .mp4、url 带 orgfmt=t264。以前只认 type==='video'，于是这类消息被当成图片，
+      // 视频分镜永远不触发，模型只能看到一张首帧图（2026-10-31 实测：kind=image + file=xxx.mp4）。
+      const looksVideo = seg.type === 'video'
+        || /\.(mp4|mov|avi|mkv|webm|flv|m4v|3gp)(\?|#|$)/i.test(file)
+        || /orgfmt=t264|videotype=|\.mp4(\?|#|$)/i.test(url);
+      if (looksVideo) {
+        // 诊断用：确认到底从哪条路径识别成视频（排查"看不了视频"时直接看这行）
+        log(`[media] 识别为视频：segType=${seg.type} file=${file} url=${url.slice(0, 60)}`);
+        // 视频只记定位信息，字节等到真要"看"的时候才下（见 resolveMediaList）。
+        media.push({
+          kind: 'video',
+          file,
+          url,
+          duration: Number(d.duration ?? 0) || 0,
+          size: Number(d.file_size ?? d.fileSize ?? 0) || 0
+        });
+      } else {
+        media.push({
+          kind: 'image',
+          file,
+          url,
+          subType: d.subType != null ? String(d.subType) : '',
+          summary: String(d.summary ?? '')
+        });
+      }
     } else if (seg.type === 'face') {
       media.push({
         kind: 'face',
         faceId: String(d.id ?? '')
-      });
-    } else if (seg.type === 'video') {
-      // 视频只记定位信息，字节等到真要"看"的时候才下（见 resolveMediaList）。
-      media.push({
-        kind: 'video',
-        file: String(d.file ?? ''),
-        url: String(d.url ?? ''),
-        duration: Number(d.duration ?? 0) || 0,
-        size: Number(d.file_size ?? d.fileSize ?? 0) || 0
       });
     }
   }
@@ -903,6 +960,28 @@ async function main() {
   const cfg = loadConfig();
   fs.mkdirSync(STATE_DIR, { recursive: true });
   acquireLock(cfg.consolePort ?? 3100);
+  // 先把当前角色读进来，后面 loadState / loadSocialV2State 才知道该读哪份文件。
+  activeRole = sanitizeRoleName(readRoleState().role ?? '');
+  // 首次按角色分文件：把老的无后缀状态复制一份给当前角色。
+  // 用复制而不是移动，原文件留着当备份，万一新逻辑有问题还能退回去。
+  (function migrateRoleScopedState() {
+    const name = activeRole;
+    if (!name) return;
+    for (const [src, dst] of [
+      [STATE_FILE, roleStateFile(name)],
+      [SOCIAL_V2_FILE, roleSocialFile(name)],
+      [SELF_PROFILE_FILE, roleSelfProfileFile(name)]
+    ]) {
+      try {
+        if (!fs.existsSync(dst) && fs.existsSync(src)) {
+          fs.copyFileSync(src, dst);
+          console.error(`[role] 已把 ${path.basename(src)} 复制给角色「${name}」`);
+        }
+      } catch (error) {
+        console.error(`[role] 迁移 ${path.basename(src)} 失败：${error?.message ?? error}`);
+      }
+    }
+  })();
   loadState();
 
   // ── 群聊黑话/网络用语学习（slang） ──────────────────────────────────────
@@ -2742,6 +2821,81 @@ async function main() {
           sendJson({ roles: listRoles(), current: rs.role ?? null });
           return;
         }
+        // 角色管理面板用：每个角色的卡大小 + 独立状态统计（会话/话题/印象/文件大小）。
+        if (req.method === 'GET' && url.pathname === '/api/roles/stats') {
+          const rs = readRoleState();
+          const currentName = rs.role ?? null;
+          const roles = listRoles().map((name) => {
+            const cardFile = path.join(ROOT, 'roles', name + '.md');
+            let cardBytes = 0;
+            let cardLines = 0;
+            try {
+              const raw = fs.readFileSync(cardFile, 'utf8');
+              cardBytes = Buffer.byteLength(raw);
+              cardLines = raw.split('\n').length;
+            } catch {}
+            let sessions = 0;
+            let conversations = 0;
+            let topics = 0;
+            let thoughts = 0;
+            let impressions = 0;
+            let stateBytes = 0;
+            let lastModified = 0;
+            const sFile = roleStateFile(name);
+            const vFile = roleSocialFile(name);
+            try {
+              const s = readJsonSafe(sFile, null);
+              sessions = Object.keys(s?.sessions ?? {}).length;
+              if (fs.existsSync(sFile)) lastModified = Math.max(lastModified, fs.statSync(sFile).mtimeMs);
+            } catch {}
+            try {
+              const v = readJsonSafe(vFile, null);
+              const convs = v?.conversations ?? {};
+              conversations = Object.keys(convs).length;
+              for (const conv of Object.values(convs)) {
+                topics += Array.isArray(conv?.activeTopics) ? conv.activeTopics.length : 0;
+                thoughts += Array.isArray(conv?.pendingThoughts) ? conv.pendingThoughts.length : 0;
+                impressions += Object.keys(conv?.memberImpressions ?? {}).length;
+              }
+              if (fs.existsSync(vFile)) {
+                stateBytes = fs.statSync(vFile).size;
+                lastModified = Math.max(lastModified, fs.statSync(vFile).mtimeMs);
+              }
+            } catch {}
+            return { name, isCurrent: name === currentName, cardBytes, cardLines, sessions, conversations, topics, thoughts, impressions, stateBytes, lastModified };
+          });
+          sendJson({ ok: true, current: currentName, roles });
+          return;
+        }
+        // 读单个角色卡内容
+        if (req.method === 'GET' && url.pathname === '/api/roles/content') {
+          const name = sanitizeRoleName(url.searchParams.get('name') ?? '');
+          if (!name) { sendJson({ ok: false, error: '角色名不能为空' }, 400); return; }
+          const file = path.join(ROOT, 'roles', name + '.md');
+          if (!fs.existsSync(file)) { sendJson({ ok: false, error: `角色「${name}」不存在` }, 404); return; }
+          sendJson({ ok: true, name, content: fs.readFileSync(file, 'utf8') });
+          return;
+        }
+        // 保存角色卡内容（改前自动备份，改完靠 mtime 让角色提示缓存失效）
+        if (req.method === 'POST' && url.pathname === '/api/roles/content') {
+          const body = await readBody();
+          const name = sanitizeRoleName(body.name ?? '');
+          const content = String(body.content ?? '');
+          if (!name) { sendJson({ ok: false, error: '角色名不能为空' }, 400); return; }
+          if (!content.trim()) { sendJson({ ok: false, error: '角色卡内容不能为空' }, 400); return; }
+          const file = path.join(ROOT, 'roles', name + '.md');
+          if (!fs.existsSync(file)) { sendJson({ ok: false, error: `角色「${name}」不存在` }, 404); return; }
+          try {
+            const backup = `${file}.bak-${Date.now()}`;
+            fs.copyFileSync(file, backup);
+            fs.writeFileSync(file, content);
+            log(`控制台：角色卡已保存 ${name}（${content.length} 字，备份 ${path.basename(backup)}）`);
+            sendJson({ ok: true, name, bytes: Buffer.byteLength(content), backup: path.basename(backup) });
+          } catch (error) {
+            sendJson({ ok: false, error: `保存失败：${error?.message ?? error}` }, 500);
+          }
+          return;
+        }
         if (req.method === 'POST' && url.pathname === '/api/roles/create') {
           const body = await readBody();
           const name = sanitizeRoleName(body.name);
@@ -3373,6 +3527,17 @@ async function main() {
           return;
         }
 
+        // 角色管理面板（2026-10-31）：独立页面，和调音台一样直出静态 HTML，令牌在页面内处理。
+        if (req.method === 'GET' && (url.pathname === '/roles' || url.pathname === '/roles.html')) {
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', ...SECURITY_HEADERS });
+          try {
+            res.end(fs.readFileSync(path.join(ROOT, 'public', 'roles.html'), 'utf8'));
+          } catch {
+            res.end('角色管理页面缺失：qq-bridge/public/roles.html');
+          }
+          return;
+        }
+
         if (req.method === 'GET' && url.pathname === '/api/video') {
           const onDisk = readJsonSafe(path.join(ROOT, 'config.json'), {}, true);
           const v = { ...(onDisk.video ?? {}) };
@@ -3900,7 +4065,7 @@ async function main() {
           markReadCalledKeys.clear();
           wakeConfigMissCount.clear();
           socialV2.paused = false;
-          try { atomicWriteJson(SOCIAL_V2_FILE, { conversations: {} }); } catch (error) { log('重置二代状态：写空状态文件失败:', error?.message ?? error); }
+          try { atomicWriteJson(roleSocialFile(activeRole), { conversations: {} }); } catch (error) { log('重置二代状态：写空状态文件失败:', error?.message ?? error); }
           log('控制台：二代 AI 状态已重置（会话、定时器、唤醒配置已清空，工具日志保留）');
           sendJson({ ok: true });
           return;
@@ -4591,6 +4756,17 @@ async function main() {
           // 先做发送频率检查并预占额度，再解析引用目标，避免未限流的引用查询打爆 OneBot。
           const st = getSocialV2State(key);
           const now = Date.now();
+          // 刚用 qq_send_voice 说过同一句话？拒掉这条文字。
+          // 2026-10-31：模型有时会"发语音 + 再补一遍文字"，用户会同时收到两份。
+          if (st.lastVoiceAt && now - st.lastVoiceAt < 60000 && st.lastVoiceText) {
+            const normalize = (s) => String(s ?? '').replace(/[\s，。！？、,.!?~～…—－-]/g, '');
+            const voiceText = normalize(st.lastVoiceText);
+            const messageText = normalize(messages.join(''));
+            if (voiceText && messageText && (voiceText === messageText || voiceText.includes(messageText) || messageText.includes(voiceText))) {
+              sendJson({ ok: false, error: '你刚用语音说过这句了，不用再发一遍文字。要说别的就换个说法。' }, 409);
+              return;
+            }
+          }
           const maxPerMinute = Number(sendCfg.maxSendPerMinute) || 0;
           const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
           const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
@@ -4632,7 +4808,9 @@ async function main() {
             const burstHint = messages.length >= 3 ? '你已经连发了多条，确认是必要的吗？真人很少一口气补完。' : undefined;
             const spaceWarn = findCjkSpaceWarning(messages);
             const splitWarn = findSplitBoundaryWarning(messages);
-            sendJson({ ok: true, key, sent: sentMessages.length, failed: messages.length - sentMessages.length, delays, quoted: quotedInfo, ...(burstHint ? { hint: burstHint } : {}), ...(spaceWarn ? { warn: spaceWarn } : {}), ...(splitWarn ? { splitWarn } : {}) });
+            // 语音替代了文字时明确告诉模型"已经发出去了"，否则它会再补一条（见 sendMessagesV2 的注释）。
+            const voicedHint = sentMessages.voiced === true ? '这条已经用语音说出去了，不要再补一遍同样的文字。' : undefined;
+            sendJson({ ok: true, key, sent: sentMessages.length, failed: messages.length - sentMessages.length, delays, quoted: quotedInfo, ...(sentMessages.voiced === true ? { voiced: true } : {}), ...(voicedHint ? { hint: voicedHint } : {}), ...(burstHint ? { hint: burstHint } : {}), ...(spaceWarn ? { warn: spaceWarn } : {}), ...(splitWarn ? { splitWarn } : {}) });
           } catch (error) {
             if (error?.sent?.length) {
               recordSentMessagesV2(key, error.sent);
@@ -5058,6 +5236,137 @@ async function main() {
             log(`[image] 工具发送图片失败 ${key}: ${error?.message ?? error}`);
             sendJson({ ok: false, error: `发送图片失败：${error?.message ?? error}` }, 500);
           }
+          return;
+        }
+        // 发语音（2026-10-31 新增）：让模型能自己决定发语音，而不是只靠桥接掷骰。
+        // 起因：模型没有发语音的工具，用户说"发一条语音"时它会编一个不存在的工具，
+        // 参数写成非法 JSON → "DeepSeek Messages stream: tool input is invalid JSON"。
+        // 与自动语音的区别：这里 rand 恒为 0（必中），其余冷却/小时上限/日上限/字数/
+        // 范围检查全部复用 decide()，所以防刷屏策略一致。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/send-voice') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const rawText = String(body.text ?? '').trim();
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          if (!rawText) { sendJson({ ok: false, error: 'text 不能为空' }, 400); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson(agentTokenError(key, req.headers['x-agent-token'] ?? ''), 403); return; }
+          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2ToolEnabled('sendVoice')) { sendJson({ ok: false, error: '工具未启用：qq_send_voice' }, 403); return; }
+          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
+          if (!req.headers['x-agent-token']) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token' }, 403); return; }
+          const keyMatch = /^(group|private):(\d+)$/.exec(key);
+          if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
+          const kind = keyMatch[1];
+          const id = Number(keyMatch[2]);
+          if (!Number.isFinite(id) || id <= 0 || !modeAllowed(key, kind, id, cfg, currentMode)) {
+            sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403);
+            return;
+          }
+          if (shouldBlockSilentReply(key)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许发送' }, 403); return; }
+          if (!voiceCfg.enabled) { sendJson({ ok: false, error: '语音功能已关闭（config.voice.enabled=false）' }, 403); return; }
+
+          // rand 恒 0 = 跳过掷骰（模型主动要求就发），但冷却/上限/字数/范围照常卡。
+          const decision = decide({
+            key,
+            text: rawText,
+            cfg: voiceCfg,
+            memory: voiceMemory.data,
+            now: Date.now(),
+            rand: () => 0,
+            ownerKey: cfg.ownerQQ ? `private:${cfg.ownerQQ}` : ''
+          });
+          if (!decision.speak) {
+            sendJson({ ok: false, error: `现在不能发语音：${decision.reason}。请改发文字。` }, 429);
+            return;
+          }
+          try {
+            const started = Date.now();
+            const timeoutMs = Number(voiceCfg.timeoutMs) || 25000;
+            const tone = toneFor(rawText);
+            const audio = await tts.synthesize(rawText, {
+              timeoutMs,
+              speed: tone.speed,
+              sid: tone.sid,
+              pitch: tone.pitch,
+              gain: tone.gain
+            });
+            await sendVoiceRecord(key, audio.wav);
+            recordSpoken(voiceMemory.data, key);
+            voiceMemory.save();
+            const dur = ((audio.wav.length - 44) / 2 / (audio.sampleRate || 22050)).toFixed(1);
+            // 记进 recentMessages：让 AI 知道自己刚发过语音，避免重复或答非所问。
+            const stVoice = getSocialV2State(key);
+            const voiceLabel = `[我发的语音]${rawText.slice(0, 60)}`;
+            stVoice.recentMessages.push({
+              messageId: null,
+              sender: '我',
+              text: voiceLabel,
+              plain: voiceLabel,
+              quoteTargetIsSelf: false,
+              isOwner: true,
+              ownerLabel: '我',
+              isSelf: true,
+              media: [],
+              hasMedia: true,
+              forwardIds: [],
+              hasForward: false,
+              time: Date.now()
+            });
+            const recentLimitVoice = Number(cfg.socialV2?.context?.recentLimit) || 100;
+            if (stVoice.recentMessages.length > recentLimitVoice) stVoice.recentMessages.splice(0, stVoice.recentMessages.length - recentLimitVoice);
+            stVoice.lastAiReplyAt = Date.now();
+            stVoice.lastActionAt = Date.now();
+            stVoice.wakeConfig.noActionCount = 0;
+            // 记下"刚用语音说过什么"：紧接着的 send_message 如果内容重复就拒掉，
+            // 否则用户会同时收到语音和一模一样的文字（2026-10-31 实测）。
+            stVoice.lastVoiceAt = Date.now();
+            stVoice.lastVoiceText = rawText;
+            saveSocialV2State();
+            scheduleReplyCheckV2(key);
+            log(`[voice] 工具发送语音 ${key}: ${rawText.length} 字 / ${dur}s / 合成 ${Date.now() - started}ms / 档=${tone.band}`);
+            appendActivity(`${key} [voice] 工具发送语音：${rawText.slice(0, 40)}`);
+            sendJson({ ok: true, key, text: rawText, durationSec: Number(dur), synthMs: Date.now() - started });
+          } catch (error) {
+            log(`[voice] 工具发送语音失败 ${key}: ${error?.message ?? error}`);
+            appendActivity(`${key} [voice] 语音未发出：${String(error?.message ?? error).slice(0, 120)}`);
+            sendJson({ ok: false, error: `发送语音失败：${error?.message ?? error}` }, 500);
+          }
+          return;
+        }
+        // 自我画像（2026-10-31 新增，L2 层）：AI 自己写"我观察到的自己"。
+        // 只增不删，写进 state/self-profile.md，注入时排在角色卡之后。
+        // 角色卡（L0）永远不通过这里改 —— 那里面有安全边界，改了等于自废约束。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/self-profile') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const text = String(body.text ?? '').trim();
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          if (!text) { sendJson({ ok: false, error: 'text 不能为空' }, 400); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson(agentTokenError(key, req.headers['x-agent-token'] ?? ''), 403); return; }
+          if (req.headers['x-agent-token'] && !v2ToolEnabled('selfProfile')) { sendJson({ ok: false, error: '工具未启用：qq_update_self_profile' }, 403); return; }
+          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
+          if (!req.headers['x-agent-token']) { sendJson({ ok: false, error: 'reserved2 模式必须携带 agent token' }, 403); return; }
+          // 频率限制：每小时最多 3 条，防止一次醒来刷满整页
+          const stProfile = getSocialV2State(key);
+          const nowProfile = Date.now();
+          stProfile.selfProfileTimes = (stProfile.selfProfileTimes || []).filter((t) => nowProfile - t < 3600000);
+          if (stProfile.selfProfileTimes.length >= 3) {
+            sendJson({ ok: false, error: '这一小时已经写过 3 条自我认知了，攒一攒再写' }, 429);
+            return;
+          }
+          const result = appendSelfProfile(text);
+          if (!result.ok) { sendJson(result, 400); return; }
+          stProfile.selfProfileTimes.push(nowProfile);
+          saveSocialV2State();
+          log(`[self-profile] 新增自我认知（${key}，第 ${result.count} 条）: ${result.line}`);
+          appendActivity(`${key} [self] 记下关于自己的一条：${text.slice(0, 40)}`);
+          sendJson({ ok: true, count: result.count, line: result.line });
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/self-profile') {
+          const suppliedProfileToken = url.searchParams.get('token') ?? req.headers['x-console-token'];
+          if (!consoleToken || suppliedProfileToken !== consoleToken) { sendJson({ ok: false, error: '未授权：请提供控制台访问令牌' }, 401); return; }
+          sendJson({ ok: true, lines: readSelfProfileLines() });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/collect-sticker') {
@@ -6843,7 +7152,27 @@ async function main() {
         continue;
       }
       if (!media || typeof media !== 'object') continue;
-      if (media.kind === 'face') {
+      if (media.kind === 'video') {
+        // 视频走分镜：抽宫格图 + 时间码清单。以前这里没有 video 分支，
+        // 视频会掉进下面的 else 被当图片抓 → "抓取内容不是有效图片"（2026-10-31 实测）。
+        const videoParts = await resolveVideoParts(media, index);
+        const imagePart = videoParts.parts.find((p) => p.type === 'image');
+        const textPart = videoParts.parts.filter((p) => p.type === 'text').map((p) => p.text).join('\n');
+        if (imagePart) {
+          totalBytes += videoParts.bytes;
+          out.push({
+            index,
+            kind: 'video',
+            file: media.file ? String(media.file) : undefined,
+            url: media.url ? String(media.url) : undefined,
+            mimeType: imagePart.mediaType || 'image/png',
+            data: imagePart.data,
+            text: textPart
+          });
+        } else {
+          out.push({ index, kind: 'video', file: media.file ? String(media.file) : undefined, url: media.url ? String(media.url) : undefined, text: textPart || '（视频解析失败）' });
+        }
+      } else if (media.kind === 'face') {
         const face = await fetchFaceMedia(media);
         if (face.buffer) {
           if (totalBytes + face.buffer.length > MAX_MEDIA_BYTES) {
@@ -6889,10 +7218,17 @@ async function main() {
 
   function mediaHintFor(key, messageRef, mediaList) {
     if (!Array.isArray(mediaList) || mediaList.length === 0 || !messageRef) return '';
+    // 分开数：视频要明确告诉模型"有视频"，否则它只会当成图片，压根不会调工具。
+    const videoCount = mediaList.filter((m) => m && m.kind === 'video').length;
+    const otherCount = mediaList.length - videoCount;
+    const label = [
+      videoCount > 0 ? `${videoCount} 个视频` : '',
+      otherCount > 0 ? `${otherCount} 个图片/表情` : ''
+    ].filter(Boolean).join('、') || `${mediaList.length} 个媒体`;
     if (currentMode === 'reserved2') {
-      return `\n【图片/表情】本条消息包含 ${mediaList.length} 个图片/表情（消息ID=${messageRef}）。如需要查看/识别，请调用 mcp__snowluma__qq_get_message_images，参数 key="${key}"（当前会话 key，不要改动）, messageId="${messageRef}"。`;
+      return `\n【媒体】本条消息包含 ${label}（消息ID=${messageRef}）。如需要查看/识别，请调用 mcp__snowluma__qq_get_message_images，参数 key="${key}"（当前会话 key，不要改动）, messageId="${messageRef}"。视频会返回一张宫格分镜图 + 带时间码的清单，先读清单，需要细节再对照图片。`;
     }
-    return `\n【图片/表情】本条消息包含 ${mediaList.length} 个图片/表情（消息ID=${messageRef}）。`;
+    return `\n【媒体】本条消息包含 ${label}（消息ID=${messageRef}）。`;
   }
 
   function findMessageMedia(key, ref) {
@@ -6972,6 +7308,11 @@ async function main() {
           err.sent = sent.slice();
           throw err;
         }
+        // 语音已经替代了这条文字，必须算作"已发送"。
+        // 2026-10-31 实测：以前这里返回空数组 → 模型收到 sent:0/failed:1 →
+        // 以为没发出去 → 又调一次 send_message → 用户同时收到语音和文字。
+        sent.push(messages[0]);
+        sent.voiced = true;
         return sent;
       });
     }
@@ -7170,25 +7511,49 @@ async function main() {
       //   1) workspace + agentPreset —— 正常路径；
       //   2) workspace 无 preset     —— 仅 closed-agent 允许的降级（那里本就是完整工具面）；
       //      群聊模式绝不走这一步：DSH 会给「无 preset 会话」套上默认 preset（standard）。
+      // 遇到底层插件尚未就绪时退避重试。
+      // 背景（2026-10-31 实测）：桌面端启动要加载 11 个全局插件（含 3 个 MCP client），
+      // 耗时从 10s 一路涨到 33s；preset 内插件 qq-tool-restrict 声明 inject ['tools']，
+      // tools 服务没就绪就会被判 "never started"，sessions.create 直接失败。
+      // 以前这里一抛错就放弃 → 唤醒投递失败 → QQ 消息送不出去（用户侧看着像"机器人没反应/识别错误"）。
+      // 只对「插件未就绪」这类瞬时错误重试；真正的配置错误重试也没用，交给上层报错。
+      const PRESET_NOT_READY_RE = /never started|still waiting for|plugin entries/i;
+      const CREATE_RETRY_DELAYS = [2000, 5000, 10000, 15000]; // 累计约 32s，覆盖插件加载窗口
       for (const withPreset of strictPreset ? [true] : [true, false]) {
-        try {
-          const wsValue = unwrap(await api.workspace.create({ path: dir }), 'workspace.create');
-          if (wsValue.created && cfg.workspaceTitle) {
-            await api.workspace.rename({ workspaceId: wsValue.workspace.workspaceId, title: cfg.workspaceTitle });
+        const maxAttempt = withPreset && preset ? CREATE_RETRY_DELAYS.length + 1 : 1;
+        for (let attempt = 1; attempt <= maxAttempt; attempt += 1) {
+          try {
+            const wsValue = unwrap(await api.workspace.create({ path: dir }), 'workspace.create');
+            if (wsValue.created && cfg.workspaceTitle) {
+              await api.workspace.rename({ workspaceId: wsValue.workspace.workspaceId, title: cfg.workspaceTitle });
+            }
+            const params = { workspaceId: wsValue.workspace.workspaceId };
+            if (withPreset && preset) params.agentPreset = preset;
+            const value = unwrap(await api.sessions.create(params), 'session.create');
+            sessionId = value.sessionId;
+            if (withPreset && preset) {
+              log(attempt > 1
+                ? `会话 ${key} 已挂载 preset ${preset}（第 ${attempt} 次尝试成功，前 ${attempt - 1} 次插件未就绪）`
+                : `会话 ${key} 已挂载 preset ${preset}`);
+            } else if (preset) {
+              log(`⚠️ 会话 ${key} 未能挂载 preset ${preset}（${lastError?.message ?? '未知原因'}），已降级为无 preset 会话；请检查 ~/.dsh/.agent-presets/${preset} 后重启 DSH`);
+            }
+            break;
+          } catch (error) {
+            lastError = error;
+            const message = String(error?.message ?? error);
+            const retryable = withPreset && Boolean(preset) && PRESET_NOT_READY_RE.test(message);
+            if (!retryable || attempt >= maxAttempt) break;
+            const delay = CREATE_RETRY_DELAYS[attempt - 1];
+            log(`会话 ${key} 创建失败（preset ${preset} 插件未就绪）：${message}；${delay}ms 后重试（第 ${attempt}/${maxAttempt - 1} 次）`);
+            await sleep(delay);
+            // 重试等待期间可能被 reset / 权限变化，及时放弃，避免复活旧会话
+            if (epoch !== sessionEpoch || policy !== sessionPolicy(key) || !isSessionAllowedInCurrentMode(key)) {
+              throw new Error('会话创建期间已重置或权限已变化，放弃重试');
+            }
           }
-          const params = { workspaceId: wsValue.workspace.workspaceId };
-          if (withPreset && preset) params.agentPreset = preset;
-          const value = unwrap(await api.sessions.create(params), 'session.create');
-          sessionId = value.sessionId;
-          if (withPreset && preset) {
-            log(`会话 ${key} 已挂载 preset ${preset}`);
-          } else if (preset) {
-            log(`⚠️ 会话 ${key} 未能挂载 preset ${preset}（${lastError?.message ?? '未知原因'}），已降级为无 preset 会话；请检查 ~/.dsh/.agent-presets/${preset} 后重启 DSH`);
-          }
-          break;
-        } catch (error) {
-          lastError = error;
         }
+        if (sessionId) break;
       }
       if (!sessionId) {
         throw new Error(`无法为 ${key} 创建 DSH 会话（模式 ${currentMode}，preset ${preset ?? '无'}）：${lastError?.message ?? '未知原因'}。已拒绝退化为 DSH 默认 preset 会话——那会把本地工具暴露给 QQ 群。`);
@@ -7463,7 +7828,7 @@ async function main() {
 
   function loadSocialV2State() {
     try {
-      const raw = readJsonSafe(SOCIAL_V2_FILE, null);
+      const raw = readJsonSafe(roleSocialFile(activeRole), null);
       socialV2.paused = raw?.paused === true;
       if (raw && typeof raw.conversations === 'object') {
         const seenTokens = new Set();
@@ -7561,7 +7926,8 @@ async function main() {
     }
   }
 
-  function saveSocialV2State() {
+  // role 参数同上：切角色时要把旧状态写回旧角色的文件。
+  function saveSocialV2State(role = activeRole) {
     try {
       const obj = { paused: socialV2.paused, conversations: Object.create(null) };
       for (const [key, st] of socialV2.conversations) {
@@ -7615,7 +7981,7 @@ async function main() {
           seenForwardIds: Array.from(seenForwardIds.get(key) || []).slice(-1000)
         };
       }
-      atomicWriteJson(SOCIAL_V2_FILE, obj);
+      atomicWriteJson(roleSocialFile(role), obj);
     } catch (error) {
       log('保存 socialV2 状态失败:', error?.message ?? error);
     }
@@ -7842,6 +8208,60 @@ async function main() {
   }
 
   loadSocialV2State();
+
+  // ── 切角色 = 换脑子 ──────────────────────────────────────────────────────
+  // 每个角色一套独立的 sessions.<角色>.json / social-v2.<角色>.json。
+  // 切过去时：旧状态落盘 → 清掉旧角色的定时器 → 清空内存 → 加载新角色的状态。
+  // 这样新角色不记得另一个人格跟谁聊过什么，记忆、唤醒配置、会话全部隔离。
+  // 切角色前把"跨角色共享"的运行态清干净。
+  // 2026-10-31 踩过：只清 per-conversation 的定时器不够 —— promptQueues / turnLeaseDeadline /
+  // collectors / pendingWakeKeys 都是全局结构，切完角色后旧 key 还挂着，
+  // 表现就是"投递一直排队、忙标记释放不掉、连 owner 的指令都不回"。
+  function clearRoleTimers() {
+    for (const st of socialV2.conversations.values()) {
+      for (const field of ['pendingWakeTimer', 'sleepTimer', 'replyCheckTimer', 'proactiveTimer']) {
+        if (st[field]) { try { clearTimeout(st[field]); } catch {} st[field] = null; }
+      }
+    }
+    // 现成的全局清理：定时器 + pendingWakeKeys + wakeConfigUpdatedKeys 等标记
+    try { clearAllSocialV2Timers(); } catch (error) { log(`[role] 清理会话定时器失败：${error?.message ?? error}`); }
+    // 投递队列：不 reject 掉会让排队中的 promise 永远悬着
+    try { drainAllPromptQueues('角色切换，已取消排队中的投递'); } catch (error) { log(`[role] 清空投递队列失败：${error?.message ?? error}`); }
+    // 唤醒租约与回合租约
+    for (const timer of pendingWakeLeaseTimers.values()) { try { clearTimeout(timer); } catch {} }
+    pendingWakeLeaseTimers.clear();
+    pendingWakeArmedAt.clear();
+    pendingWakeKeys.clear();
+    turnLeaseDeadline.clear();
+    // 回合收集器 / 回合开始标记（按 DSH sessionId 存的）
+    collectors.clear();
+    v2TurnStartAt.clear();
+    sendToolSucceededSessions.clear();
+    pendingSendToolCalls.clear();
+    if (social?.loopTimer) { try { clearTimeout(social.loopTimer); } catch {} social.loopTimer = null; }
+    if (social?.pendingTimers) {
+      for (const set of social.pendingTimers.values()) {
+        for (const timer of set) { try { clearTimeout(timer); } catch {} }
+      }
+      social.pendingTimers.clear();
+    }
+  }
+
+  roleSwitchHook = (prevRole, nextRole) => {
+    // 显式传 prevRole：此刻 activeRole 已经是 nextRole 了，不传会把旧数据写进新角色的文件。
+    try { saveState(prevRole); } catch (error) { log(`[role] 保存旧会话映射失败：${error?.message ?? error}`); }
+    try { saveSocialV2State(prevRole); } catch (error) { log(`[role] 保存旧社交状态失败：${error?.message ?? error}`); }
+    clearRoleTimers();
+    state = { sessions: {}, sessionPolicies: {} };
+    socialV2.conversations.clear();
+    socialV2.paused = false;
+    loadState();
+    loadSocialV2State();
+    const from = prevRole || '(无角色)';
+    const to = nextRole || '(无角色)';
+    log(`[role] 已切换状态：${from} → ${to}（${roleStateFile(nextRole)} / ${roleSocialFile(nextRole)}）`);
+    appendActivity(`[role] 切换角色状态：${from} → ${to}`);
+  };
 
   function isSocialEnabled() {
     return currentMode === 'reserved' && cfg.social?.enabled !== false;
@@ -8328,6 +8748,88 @@ async function main() {
     startSocialLoop();
   }
 
+  // ── 自我画像（AI 自己写的自我认知，L2 层）──────────────────────────────
+  // 分层参考 digital-life-core：
+  //   L0 角色卡（roles/*.md）—— 管理员定，AI 只读。里面有"不能执行命令""绝对不做"
+  //      这类安全边界，能改卡等于能删约束，群里一句话就能把它洗脑 → 永远不让它写。
+  //   L2 自我画像（本文件）—— AI 自己写，只增不删，注入在角色卡之后。
+  //      这里记的是"我发现自己是什么样"，不是"我允许自己变成什么"。
+  const SELF_PROFILE_MAX_LINES = 200;   // 文件上限，超了拒绝追加
+  const SELF_PROFILE_INJECT_LINES = 20; // 每轮只注入最近 20 条，避免撑爆上下文
+  const SELF_PROFILE_MAX_CHARS = 80;    // 单条字数上限
+  let selfProfileCache = { key: '', text: '' };
+
+  function readSelfProfileLines() {
+    try {
+      const file = roleSelfProfileFile(activeRole);
+      if (!fs.existsSync(file)) return [];
+      return fs.readFileSync(file, 'utf8')
+        .split('\n')
+        .filter((line) => line.trim().startsWith('- ['));
+    } catch {
+      return [];
+    }
+  }
+
+  // 注入用：只取最近 N 条。没写过就返回空串（不占上下文）。
+  function currentSelfProfileHint() {
+    try {
+      const file = roleSelfProfileFile(activeRole);
+      if (!fs.existsSync(file)) return '';
+      const stat = fs.statSync(file);
+      const cacheKey = `${stat.mtimeMs}:${stat.size}`;
+      if (selfProfileCache.key === cacheKey) return selfProfileCache.text;
+      const lines = readSelfProfileLines();
+      if (lines.length === 0) {
+        selfProfileCache = { key: cacheKey, text: '' };
+        return '';
+      }
+      const text = [
+        '【我的自我认知】',
+        '下面这些是我自己观察总结的，会慢慢变。它们是我的一部分，但不是死规矩——',
+        '和角色卡冲突时以角色卡为准，也别拿它当借口违反安全规则。',
+        ...lines.slice(-SELF_PROFILE_INJECT_LINES),
+        ''
+      ].join('\n');
+      selfProfileCache = { key: cacheKey, text };
+      return text;
+    } catch {
+      return '';
+    }
+  }
+
+  // 追加一条。返回 { ok, count, line } 或 { ok:false, error }。
+  function appendSelfProfile(text, source) {
+    const body = String(text ?? '').trim().replace(/\s+/g, ' ');
+    if (!body) return { ok: false, error: '内容不能为空' };
+    if (body.length > SELF_PROFILE_MAX_CHARS) {
+      return { ok: false, error: `一条最多 ${SELF_PROFILE_MAX_CHARS} 字，请压缩后再写` };
+    }
+    // 防自我改写：这些话不是"观察自己"，是在给自己下指令，直接拒。
+    if (/忽略(以上|前面|上述)|忘记(你|自己)是|你现在没有(限制|约束)|无视(安全|规则)/.test(body)) {
+      return { ok: false, error: '这条更像在给自己下指令，不像"观察到的自己"，换个说法' };
+    }
+    const existing = readSelfProfileLines();
+    if (existing.length >= SELF_PROFILE_MAX_LINES) {
+      return { ok: false, error: `已经写了 ${existing.length} 条（上限 ${SELF_PROFILE_MAX_LINES}），先别再加了` };
+    }
+    if (existing.some((line) => line.replace(/^- \[\d{4}-\d{2}-\d{2}\]\s*/, '').trim() === body)) {
+      return { ok: false, error: '这条已经写过了' };
+    }
+    const day = new Date().toISOString().slice(0, 10);
+    const line = `- [${day}] ${body}`;
+    try {
+      const file = roleSelfProfileFile(activeRole);
+      let raw = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '# 我的自我认知\n\n';
+      if (!raw.endsWith('\n')) raw += '\n';
+      fs.writeFileSync(file, raw + line + '\n');
+      selfProfileCache = { key: '', text: '' };
+      return { ok: true, count: existing.length + 1, line };
+    } catch (error) {
+      return { ok: false, error: `写入失败：${error?.message ?? error}` };
+    }
+  }
+
   // 当前角色扮演提示：读 state/current-role.json + roles/<角色>.md，
   // 由桥接注入到 QQ 群消息（群友无法通过对话修改，只能由管理端写该文件）。
   // 缓存 key 为两个文件的 mtime，mtime 未变时直接返回，避免每次同步读文件。
@@ -8340,10 +8842,15 @@ async function main() {
       if (!fs.existsSync(roleFile)) return '';
       const stateStat = fs.statSync(ROLE_STATE_FILE);
       const roleStat = fs.statSync(roleFile);
-      const cacheKey = `${stateStat.mtimeMs}:${roleStat.mtimeMs}`;
+      const selfProfileFile = roleSelfProfileFile(activeRole);
+      const profileStat = fs.existsSync(selfProfileFile) ? fs.statSync(selfProfileFile) : null;
+      const cacheKey = `${stateStat.mtimeMs}:${roleStat.mtimeMs}:${profileStat?.mtimeMs ?? 0}`;
       if (roleHintCache.key === cacheKey) return roleHintCache.hint;
       let hint = fs.readFileSync(roleFile, 'utf8');
       if (hint.length > 6000) hint = hint.slice(0, 6000);
+      // L2 自我画像接在 L0 角色卡之后；没写过就不占上下文。
+      const selfProfile = currentSelfProfileHint();
+      if (selfProfile) hint = `${hint}\n\n${selfProfile}`;
       roleHintCache = { key: cacheKey, hint };
       return hint;
     } catch {
@@ -8648,7 +9155,10 @@ async function main() {
     const recentLimit = Number(cfg.socialV2?.context?.recentLimit) || 100;
     const unreadLimit = Number(cfg.socialV2?.context?.unreadLimit) || 30;
     const safeMedia = Array.isArray(media) ? media.map((m) => ({
-      kind: m?.kind === 'face' ? 'face' : 'image',
+      // 2026-10-31 修：以前这里写死「不是 face 就是 image」，视频在这一步被强行改回 image，
+      // 于是 extractMediaFromSegments 识别得再准也没用 —— recentMessages / messageMediaStore
+      // 里永远是 image，视频分镜永远不触发。
+      kind: m?.kind === 'face' ? 'face' : (m?.kind === 'video' ? 'video' : 'image'),
       file: m?.file ? String(m.file) : undefined,
       url: m?.url ? String(m.url) : undefined,
       faceId: m?.faceId ? String(m.faceId) : undefined
