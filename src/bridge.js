@@ -806,7 +806,15 @@ async function segmentsToText(segments, options = {}) {
         break;
       }
       case 'face': out.push(`[表情${d.id ?? ''}]`); break;
-      case 'image': out.push('[图片]'); break;
+      case 'image': {
+        // 视频被报成 image 段时（见 extractMediaFromSegments 的注释），文本也要标成 [视频]，
+        // 否则模型以为收到的是图片，压根不会去调分镜。
+        const f = String(d.file ?? '');
+        const u = String(d.url ?? '');
+        const isVid = /\.(mp4|mov|avi|mkv|webm|flv|m4v|3gp)(\?|#|$)/i.test(f) || /orgfmt=t264|videotype=/i.test(u);
+        out.push(isVid ? '[视频]' : '[图片]');
+        break;
+      }
       case 'record': out.push('[语音]'); break;
       case 'video': out.push('[视频]'); break;
       case 'file': out.push(`[文件${d.name ?? ''}]`); break;
@@ -848,27 +856,39 @@ function extractMediaFromSegments(segments) {
   for (const seg of segments ?? []) {
     if (!seg || typeof seg !== 'object') continue;
     const d = seg.data ?? {};
-    if (seg.type === 'image') {
-      media.push({
-        kind: 'image',
-        file: String(d.file ?? ''),
-        url: String(d.url ?? ''),
-        subType: d.subType != null ? String(d.subType) : '',
-        summary: String(d.summary ?? '')
-      });
+    if (seg.type === 'image' || seg.type === 'video') {
+      const file = String(d.file ?? '');
+      const url = String(d.url ?? '');
+      // 不能只看 seg.type：有些 OneBot 实现（含 SnowLuma 的部分版本）把视频报成 image 段，
+      // file 是 .mp4、url 带 orgfmt=t264。以前只认 type==='video'，于是这类消息被当成图片，
+      // 视频分镜永远不触发，模型只能看到一张首帧图（2026-10-31 实测：kind=image + file=xxx.mp4）。
+      const looksVideo = seg.type === 'video'
+        || /\.(mp4|mov|avi|mkv|webm|flv|m4v|3gp)(\?|#|$)/i.test(file)
+        || /orgfmt=t264|videotype=|\.mp4(\?|#|$)/i.test(url);
+      if (looksVideo) {
+        // 诊断用：确认到底从哪条路径识别成视频（排查"看不了视频"时直接看这行）
+        log(`[media] 识别为视频：segType=${seg.type} file=${file} url=${url.slice(0, 60)}`);
+        // 视频只记定位信息，字节等到真要"看"的时候才下（见 resolveMediaList）。
+        media.push({
+          kind: 'video',
+          file,
+          url,
+          duration: Number(d.duration ?? 0) || 0,
+          size: Number(d.file_size ?? d.fileSize ?? 0) || 0
+        });
+      } else {
+        media.push({
+          kind: 'image',
+          file,
+          url,
+          subType: d.subType != null ? String(d.subType) : '',
+          summary: String(d.summary ?? '')
+        });
+      }
     } else if (seg.type === 'face') {
       media.push({
         kind: 'face',
         faceId: String(d.id ?? '')
-      });
-    } else if (seg.type === 'video') {
-      // 视频只记定位信息，字节等到真要"看"的时候才下（见 resolveMediaList）。
-      media.push({
-        kind: 'video',
-        file: String(d.file ?? ''),
-        url: String(d.url ?? ''),
-        duration: Number(d.duration ?? 0) || 0,
-        size: Number(d.file_size ?? d.fileSize ?? 0) || 0
       });
     }
   }
@@ -6843,7 +6863,27 @@ async function main() {
         continue;
       }
       if (!media || typeof media !== 'object') continue;
-      if (media.kind === 'face') {
+      if (media.kind === 'video') {
+        // 视频走分镜：抽宫格图 + 时间码清单。以前这里没有 video 分支，
+        // 视频会掉进下面的 else 被当图片抓 → "抓取内容不是有效图片"（2026-10-31 实测）。
+        const videoParts = await resolveVideoParts(media, index);
+        const imagePart = videoParts.parts.find((p) => p.type === 'image');
+        const textPart = videoParts.parts.filter((p) => p.type === 'text').map((p) => p.text).join('\n');
+        if (imagePart) {
+          totalBytes += videoParts.bytes;
+          out.push({
+            index,
+            kind: 'video',
+            file: media.file ? String(media.file) : undefined,
+            url: media.url ? String(media.url) : undefined,
+            mimeType: imagePart.mediaType || 'image/png',
+            data: imagePart.data,
+            text: textPart
+          });
+        } else {
+          out.push({ index, kind: 'video', file: media.file ? String(media.file) : undefined, url: media.url ? String(media.url) : undefined, text: textPart || '（视频解析失败）' });
+        }
+      } else if (media.kind === 'face') {
         const face = await fetchFaceMedia(media);
         if (face.buffer) {
           if (totalBytes + face.buffer.length > MAX_MEDIA_BYTES) {
@@ -6889,10 +6929,17 @@ async function main() {
 
   function mediaHintFor(key, messageRef, mediaList) {
     if (!Array.isArray(mediaList) || mediaList.length === 0 || !messageRef) return '';
+    // 分开数：视频要明确告诉模型"有视频"，否则它只会当成图片，压根不会调工具。
+    const videoCount = mediaList.filter((m) => m && m.kind === 'video').length;
+    const otherCount = mediaList.length - videoCount;
+    const label = [
+      videoCount > 0 ? `${videoCount} 个视频` : '',
+      otherCount > 0 ? `${otherCount} 个图片/表情` : ''
+    ].filter(Boolean).join('、') || `${mediaList.length} 个媒体`;
     if (currentMode === 'reserved2') {
-      return `\n【图片/表情】本条消息包含 ${mediaList.length} 个图片/表情（消息ID=${messageRef}）。如需要查看/识别，请调用 mcp__snowluma__qq_get_message_images，参数 key="${key}"（当前会话 key，不要改动）, messageId="${messageRef}"。`;
+      return `\n【媒体】本条消息包含 ${label}（消息ID=${messageRef}）。如需要查看/识别，请调用 mcp__snowluma__qq_get_message_images，参数 key="${key}"（当前会话 key，不要改动）, messageId="${messageRef}"。视频会返回一张宫格分镜图 + 带时间码的清单，先读清单，需要细节再对照图片。`;
     }
-    return `\n【图片/表情】本条消息包含 ${mediaList.length} 个图片/表情（消息ID=${messageRef}）。`;
+    return `\n【媒体】本条消息包含 ${label}（消息ID=${messageRef}）。`;
   }
 
   function findMessageMedia(key, ref) {
@@ -8648,7 +8695,10 @@ async function main() {
     const recentLimit = Number(cfg.socialV2?.context?.recentLimit) || 100;
     const unreadLimit = Number(cfg.socialV2?.context?.unreadLimit) || 30;
     const safeMedia = Array.isArray(media) ? media.map((m) => ({
-      kind: m?.kind === 'face' ? 'face' : 'image',
+      // 2026-10-31 修：以前这里写死「不是 face 就是 image」，视频在这一步被强行改回 image，
+      // 于是 extractMediaFromSegments 识别得再准也没用 —— recentMessages / messageMediaStore
+      // 里永远是 image，视频分镜永远不触发。
+      kind: m?.kind === 'face' ? 'face' : (m?.kind === 'video' ? 'video' : 'image'),
       file: m?.file ? String(m.file) : undefined,
       url: m?.url ? String(m.url) : undefined,
       faceId: m?.faceId ? String(m.faceId) : undefined
