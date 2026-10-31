@@ -18,6 +18,7 @@ import { SENSITIVE_RE } from './sensitive.js';
 import { looksLikeUnfinished } from './v2-wait.js';
 import { safeFetchBuffer, looksLikeImageBuffer } from './safe-fetch.js';
 import { createApiAdapter } from './api-adapt.js';
+import { createVideoStoryboard } from './video-storyboard.js';
 import { createTts } from './tts.js';
 import { toSpeakable, hasSpeakableContent } from './tts-text.js';
 import { decide, recordSpoken, createVoiceMemory } from './voice-policy.js';
@@ -166,6 +167,12 @@ function redactSensitiveText(text) {
 // 防止底层网关把文本中的 [CQ: 当作 CQ 码解析：替换为全角冒号。
 function escapeCqText(text) {
   return String(text ?? '').replace(/\[CQ:/gi, '[CQ：');
+}
+
+// 把用户配置的字符串（如 QQ 指令前缀）安全地拼进正则。
+// 前缀是配置项，可能带 / # . 之类，直接拼会变成元字符（2026-10-30）。
+function escapeRegExp(text) {
+  return String(text ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 // 兼容模型把单条消息序列化成 JSON 字符串的情况，例如 "\"你好\"" → "你好"。
@@ -349,6 +356,35 @@ function loadConfig() {
         }
       };
     })(),
+    // 视频分镜：收到 QQ 视频时跑 dsh-video-storyboard，产出宫格图 + 时间码清单。
+    // ⚠ 2026-10-30 补：这一段以前**根本没进 loadConfig**，config.json 里的 video 段
+    //   一直被忽略（transcript=auto 等于没设），createVideoStoryboard 只能吃它自己的默认值。
+    video: {
+      enabled: true,
+      cells: 9,                        // 0 = 让插件按画面密度自己决定
+      maxBytes: 40 * 1024 * 1024,
+      timeoutMs: 150000,
+      transcript: 'off',               // off | auto（auto 需要本机 ASR 就绪）
+      keepDays: 2,
+      maxTextChars: 4000,
+      ...(file.video ?? {})
+    },
+    // QQ 指令：owner 私聊发「指令 …」→ 独立 standard 会话在本机干活。
+    // 同样是 2026-10-30 补进来的：以前 cfg.pcJobs 恒为 undefined，
+    // 前缀/总开关/工作目录全走硬编码默认值。
+    pcJobs: {
+      enabled: true,
+      prefix: '指令',
+      ownerPrivateOnly: true,
+      preset: 'standard',
+      cwd: '',
+      workspaceTitle: '',
+      ...(file.pcJobs ?? {})
+    },
+    // 允许 iframe 嵌入控制台的来源（启动器面板 3120）。空 = 用代码里的默认值。
+    consoleEmbedOrigins: Array.isArray(file.consoleEmbedOrigins)
+      ? file.consoleEmbedOrigins.map(String)
+      : undefined,
     slang: {
       enabled: true,
       extractMinMessages: 10,
@@ -820,6 +856,15 @@ function extractMediaFromSegments(segments) {
       media.push({
         kind: 'face',
         faceId: String(d.id ?? '')
+      });
+    } else if (seg.type === 'video') {
+      // 视频只记定位信息，字节等到真要"看"的时候才下（见 resolveMediaList）。
+      media.push({
+        kind: 'video',
+        file: String(d.file ?? ''),
+        url: String(d.url ?? ''),
+        duration: Number(d.duration ?? 0) || 0,
+        size: Number(d.file_size ?? d.fileSize ?? 0) || 0
       });
     }
   }
@@ -2393,9 +2438,17 @@ async function main() {
         res.end(JSON.stringify({ ok: false, error: '无效的请求地址' }));
         return;
       }
+      // 控制台允许被谁用 iframe 嵌：默认只放行本机启动器面板（3120）。
+      // 原来是 X-Frame-Options: DENY，连自己的启动器都嵌不了；换成 CSP 的
+      // frame-ancestors 精确点名，仍然挡住外部站点（2026-10-30）。
+      const EMBED_ORIGINS = (Array.isArray(cfg.consoleEmbedOrigins)
+        ? cfg.consoleEmbedOrigins
+        : ['http://127.0.0.1:3120', 'http://localhost:3120'])
+        .map((o) => String(o).trim())
+        .filter(Boolean);
       const SECURITY_HEADERS = {
-        'X-Frame-Options': 'DENY',
-        'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
+        'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+          + `frame-ancestors 'self' ${EMBED_ORIGINS.join(' ')}`,
         'Cache-Control': 'no-store',
         'X-Content-Type-Options': 'nosniff',
         'Referrer-Policy': 'no-referrer'
@@ -2498,7 +2551,13 @@ async function main() {
         if (origin) {
           let originHost = '';
           try { originHost = new URL(String(origin)).host; } catch {}
-          if (![`127.0.0.1:${port}`, `localhost:${port}`].includes(originHost)) {
+          // 嵌入到启动器面板（iframe）后，Origin 是启动器的端口而不是 3100，
+          // 这里要一并放行，否则副页面里的按钮全部 403。
+          const allowedHosts = [`127.0.0.1:${port}`, `localhost:${port}`];
+          for (const o of EMBED_ORIGINS) {
+            try { allowedHosts.push(new URL(o).host); } catch { /* 配置写歪了就跳过 */ }
+          }
+          if (!allowedHosts.includes(originHost)) {
             sendJson({ ok: false, error: '跨站请求被拒绝' }, 403);
             return;
           }
@@ -3058,6 +3117,232 @@ async function main() {
           sendJson({ ok: true, security: cfg.security });
           return;
         }
+        // ── 语音 / 视频分镜 / QQ 指令：控制台读写（2026-10-30） ────────────────
+        // 字段名和单位与启动器面板（launcher/config-ops.mjs）保持一致，
+        // 两边读写的是同一份 config.json。
+        //
+        // ⚠ 生效时机不一样，别混：
+        //   voice / video  桥接启动时快照进 tts / storyboard 实例 → 改完要重启
+        //   pcJobs         每次判定现读 cfg → 立刻生效
+        // 所以下面一律老实返回 needRestart，不假装热更新。
+        const clampNum = (v, min, max) => Math.min(max, Math.max(min, v));
+        const numOr = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
+        const MB = 1024 * 1024;
+
+        if (req.method === 'GET' && url.pathname === '/api/voice') {
+          // 读磁盘而不是内存 cfg：手动改过 config.json 之后，面板要显示文件里的真值，
+          // 否则「文件改了、面板还显示旧值」会误导人（2026-10-30）。
+          const onDisk = readJsonSafe(path.join(ROOT, 'config.json'), {}, true);
+          const v = { ...(onDisk.voice ?? {}) };
+          const local = v.local ?? {};
+          sendJson({
+            ok: true,
+            needRestart: true,
+            voice: {
+              enabled: !!v.enabled,
+              replaceText: v.replaceText !== false,
+              scope: ['owner', 'private', 'off'].includes(v.scope) ? v.scope : 'private',
+              maxChars: numOr(v.maxChars, 60),
+              minChars: numOr(v.minChars, 2),
+              probability: numOr(v.probability, 0.35),
+              emotionBoost: numOr(v.emotionBoost, 0.35),
+              cooldownSec: Math.round(numOr(v.cooldownMs, 120000) / 1000),
+              hourlyCapPerConv: numOr(v.hourlyCapPerConv, 4),
+              dailyCap: numOr(v.dailyCap, 40),
+              quietHours: Array.isArray(v.quietHours) && v.quietHours.length === 2
+                ? [numOr(v.quietHours[0], 23), numOr(v.quietHours[1], 8)]
+                : null,
+              speed: numOr(local.speed, 1),
+              sid: numOr(local.sid, 0),
+              modelDir: String(local.modelDir ?? ''),
+            },
+          });
+          return;
+        }
+
+        if (req.method === 'POST' && url.pathname === '/api/voice') {
+          const body = await readBody();
+          const configFile = path.join(ROOT, 'config.json');
+          const file = readJsonSafe(configFile, null, true);
+          const v = { ...(file.voice ?? {}) };
+          const local = { ...(v.local ?? {}) };
+          const changed = [];
+
+          if (typeof body.enabled === 'boolean' && !!v.enabled !== body.enabled) {
+            v.enabled = body.enabled; changed.push(`enabled=${body.enabled}`);
+          }
+          if (typeof body.replaceText === 'boolean' && (v.replaceText !== false) !== body.replaceText) {
+            v.replaceText = body.replaceText; changed.push(`replaceText=${body.replaceText}`);
+          }
+          if (['owner', 'private', 'off'].includes(body.scope) && v.scope !== body.scope) {
+            v.scope = body.scope; changed.push(`scope=${body.scope}`);
+          }
+
+          const setNum = (key, min, max, toStore = (n) => n, cur = v[key]) => {
+            if (body[key] === undefined || body[key] === null || body[key] === '') return;
+            const n = Number(body[key]);
+            if (!Number.isFinite(n)) return;
+            const next = toStore(clampNum(n, min, max));
+            if (Number(cur) !== next) { v[key] = next; changed.push(`${key}=${next}`); }
+          };
+          setNum('maxChars', 10, 300);
+          setNum('minChars', 1, 20);
+          setNum('probability', 0, 1);
+          setNum('emotionBoost', 0, 1);
+          setNum('hourlyCapPerConv', 1, 50);
+          setNum('dailyCap', 1, 500);
+          setNum('cooldownSec', 10, 3600, (n) => Math.round(n) * 1000, numOr(v.cooldownMs, 120000) / 1000);
+
+          if (body.quietHours === null || body.quietHours === false) {
+            if (v.quietHours !== null) { v.quietHours = null; changed.push('quietHours=关闭'); }
+          } else if (Array.isArray(body.quietHours) && body.quietHours.length === 2) {
+            const s = clampNum(Math.round(numOr(body.quietHours[0], 23)), 0, 23);
+            const e = clampNum(Math.round(numOr(body.quietHours[1], 8)), 0, 23);
+            if (s === e) {
+              if (v.quietHours !== null) { v.quietHours = null; changed.push('quietHours=关闭'); }
+            } else if (!v.quietHours || v.quietHours[0] !== s || v.quietHours[1] !== e) {
+              v.quietHours = [s, e]; changed.push(`quietHours=${s}-${e}`);
+            }
+          }
+
+          if (body.speed !== undefined && body.speed !== null && body.speed !== '') {
+            const sp = clampNum(numOr(body.speed, 1), 0.5, 2);
+            if (numOr(local.speed, 1) !== sp) { local.speed = sp; changed.push(`speed=${sp}`); }
+          }
+          if (body.sid !== undefined && body.sid !== null && body.sid !== '') {
+            const sid = clampNum(Math.round(numOr(body.sid, 0)), 0, 99);
+            if (numOr(local.sid, 0) !== sid) { local.sid = sid; changed.push(`sid=${sid}`); }
+          }
+
+          if (!changed.length) {
+            sendJson({ ok: true, needRestart: false, changed: [], note: '没有改动' });
+            return;
+          }
+
+          v.local = local;
+          file.voice = v;
+          atomicWriteJson(configFile, file);
+          cfg.voice = v;
+          log(`控制台：语音设置已更新（${changed.join('，')}）—— 重启桥接后生效`);
+          sendJson({ ok: true, needRestart: true, changed });
+          return;
+        }
+
+        if (req.method === 'GET' && url.pathname === '/api/video') {
+          const onDisk = readJsonSafe(path.join(ROOT, 'config.json'), {}, true);
+          const v = { ...(onDisk.video ?? {}) };
+          sendJson({
+            ok: true,
+            needRestart: true,
+            video: {
+              enabled: v.enabled !== false,
+              cells: numOr(v.cells, 9),
+              maxMB: Math.round((numOr(v.maxBytes, 40 * MB) / MB) * 10) / 10,
+              timeoutSec: Math.round(numOr(v.timeoutMs, 150000) / 1000),
+              transcript: v.transcript === 'auto' ? 'auto' : 'off',
+              keepDays: numOr(v.keepDays, 2),
+              maxTextChars: numOr(v.maxTextChars, 4000),
+            },
+          });
+          return;
+        }
+
+        if (req.method === 'POST' && url.pathname === '/api/video') {
+          const body = await readBody();
+          const configFile = path.join(ROOT, 'config.json');
+          const file = readJsonSafe(configFile, null, true);
+          const v = { ...(file.video ?? {}) };
+          const changed = [];
+
+          if (typeof body.enabled === 'boolean' && (v.enabled !== false) !== body.enabled) {
+            v.enabled = body.enabled; changed.push(`enabled=${body.enabled}`);
+          }
+          if ((body.transcript === 'auto' || body.transcript === 'off')
+            && (v.transcript === 'auto' ? 'auto' : 'off') !== body.transcript) {
+            v.transcript = body.transcript; changed.push(`transcript=${body.transcript}`);
+          }
+          // 插件只吃 0/4/6/9 这几种宫格
+          if (body.cells !== undefined && body.cells !== null && body.cells !== '') {
+            const raw = Math.round(Number(body.cells));
+            const cells = [0, 4, 6, 9].includes(raw) ? raw : 9;
+            if (numOr(v.cells, 0) !== cells) { v.cells = cells; changed.push(`cells=${cells}`); }
+          }
+
+          const setVid = (key, min, max, toStore, label = key) => {
+            if (body[key] === undefined || body[key] === null || body[key] === '') return;
+            const n = Number(body[key]);
+            if (!Number.isFinite(n)) return;
+            const next = toStore(clampNum(n, min, max));
+            if (Number(v[key]) !== next) { v[key] = next; changed.push(`${label}=${next}`); }
+          };
+          setVid('maxMB', 1, 200, (n) => Math.round(n * MB));
+          setVid('timeoutSec', 20, 600, (n) => Math.round(n) * 1000);
+          setVid('keepDays', 1, 30, (n) => Math.round(n));
+          setVid('maxTextChars', 500, 20000, (n) => Math.round(n));
+
+          if (!changed.length) {
+            sendJson({ ok: true, needRestart: false, changed: [], note: '没有改动' });
+            return;
+          }
+
+          file.video = v;
+          atomicWriteJson(configFile, file);
+          cfg.video = v;
+          log(`控制台：视频分镜设置已更新（${changed.join('，')}）—— 重启桥接后生效`);
+          sendJson({ ok: true, needRestart: true, changed });
+          return;
+        }
+
+        if (req.method === 'GET' && url.pathname === '/api/pcjobs') {
+          const onDisk = readJsonSafe(path.join(ROOT, 'config.json'), {}, true);
+          const p = onDisk.pcJobs ?? {};
+          sendJson({
+            ok: true,
+            needRestart: false,
+            pcJobs: {
+              enabled: p.enabled !== false,
+              prefix: String(p.prefix ?? '指令'),
+              ownerPrivateOnly: p.ownerPrivateOnly !== false,
+              cwd: String(p.cwd ?? ''),
+              preset: String(p.preset ?? 'standard'),
+              ownerQQ: cfg.ownerQQ ? String(cfg.ownerQQ) : null,
+            },
+          });
+          return;
+        }
+
+        if (req.method === 'POST' && url.pathname === '/api/pcjobs') {
+          const body = await readBody();
+          const configFile = path.join(ROOT, 'config.json');
+          const file = readJsonSafe(configFile, null, true);
+          const p = { ...(file.pcJobs ?? {}) };
+          const changed = [];
+
+          if (typeof body.enabled === 'boolean' && (p.enabled !== false) !== body.enabled) {
+            p.enabled = body.enabled; changed.push(`enabled=${body.enabled}`);
+          }
+          if (typeof body.prefix === 'string') {
+            // 前缀不能为空、不能带空白：它是正则的一部分，带空格会切错词
+            const next = body.prefix.trim().replace(/\s+/g, '').slice(0, 12);
+            if (next && next !== String(p.prefix ?? '指令')) {
+              p.prefix = next; changed.push(`prefix=${next}`);
+            }
+          }
+
+          if (!changed.length) {
+            sendJson({ ok: true, needRestart: false, changed: [], note: '没有改动' });
+            return;
+          }
+
+          file.pcJobs = p;
+          atomicWriteJson(configFile, file);
+          cfg.pcJobs = p;
+          // pcJobs 是每次判定现读 cfg 的，改完立刻生效，不用重启
+          log(`控制台：QQ 指令设置已更新（${changed.join('，')}）—— 立即生效`);
+          sendJson({ ok: true, needRestart: false, changed });
+          return;
+        }
+
         // ── 控制台访问令牌（可手动修改/生成随机） ─────────────────────────────
         if (req.method === 'POST' && url.pathname === '/api/console/token') {
           const body = await readBody();
@@ -6271,10 +6556,37 @@ async function main() {
     return { text: `[表情#${media.faceId}]` };
   }
 
+  // 视频 → 分镜图 + 时间码清单。失败就退化成一行说明，绝不让整条消息丢掉。
+  async function resolveVideoParts(media, index) {
+    if (!videoStoryboard.available()) {
+      return { bytes: 0, parts: [{ type: 'text', text: `[视频${index}（这台机器还没装视频分镜，看不到内容）]` }] };
+    }
+    const url = String(media.url ?? '').trim();
+    if (!/^https?:\/\//i.test(url)) {
+      return { bytes: 0, parts: [{ type: 'text', text: `[视频${index}（拿不到可下载的地址，看不到内容）]` }] };
+    }
+    try {
+      const result = await videoStoryboard.run({ url, tag: media.file || url });
+      const parts = [
+        { type: 'text', text: `[视频${index}] 下面是按时间顺序的分格清单，每格带起止时间；先读清单，需要细节再对照图片。` },
+        { type: 'image', mediaType: 'image/png', data: result.pngBuffer.toString('base64'), name: `qq-video-${index}.png` }
+      ];
+      if (result.text) parts.push({ type: 'text', text: result.text });
+      return { bytes: result.pngBuffer.length, parts };
+    } catch (error) {
+      log(`视频分镜失败 (${index}): ${error?.message ?? error}`);
+      return {
+        bytes: 0,
+        parts: [{ type: 'text', text: `[视频${index}（解析失败：${String(error?.message ?? error).slice(0, 100)}）]` }]
+      };
+    }
+  }
+
   async function resolveMediaList(mediaList) {
     const parts = [];
     let index = 0;
     let totalBytes = 0;
+    let videoCount = 0;
     for (const media of Array.isArray(mediaList) ? mediaList : []) {
       index += 1;
       if (index > MAX_MEDIA_COUNT) {
@@ -6282,7 +6594,17 @@ async function main() {
         continue;
       }
       if (!media || typeof media !== 'object') continue;
-      if (media.kind === 'face') {
+      if (media.kind === 'video') {
+        // 一条消息只解析第一个视频：下载 + 抽帧都是重活，连发三个视频能把回复拖成几分钟。
+        videoCount += 1;
+        if (videoCount > 1) {
+          parts.push({ type: 'text', text: `[视频${index}（单条消息只解析第一个视频，已跳过）]` });
+          continue;
+        }
+        const videoParts = await resolveVideoParts(media, index);
+        totalBytes += videoParts.bytes;
+        parts.push(...videoParts.parts);
+      } else if (media.kind === 'face') {
         const face = await fetchFaceMedia(media);
         if (face.buffer) {
           if (totalBytes + face.buffer.length > MAX_MEDIA_BYTES) {
@@ -6552,6 +6874,9 @@ async function main() {
       reasoningEffort: String(cfg.dsh?.reasoningEffort || 'max')
     })
   });
+  // 视频分镜：收到视频时把 url 落盘、跑 dsh-video-storyboard，产出宫格图 + 时间码清单。
+  // 关掉它就退回老行为（只显示 `[视频]` 占位）。
+  const videoStoryboard = createVideoStoryboard({ cfg, log, stateDir: STATE_DIR });
   // 只有"看起来像上游/鉴权/额度问题"的报错才触发换 provider，
   // 避免因为无关的业务错误把模型来回切。
   // reasoning_content 也归到这一类：换模型后旧历史缺思考链，这类模型会直接拒（2026-10-17 实测 beam-free）。
@@ -10350,8 +10675,14 @@ ${stickerMenu ? `\n${stickerMenu}\n` : ''}
 
     // ── PC 指令入口：owner 私聊里以「指令」开头（或 /pc）→ 交本机干活会话执行 ──
     // 只认 owner + 只认私聊：群友、群里、其他人一律进不来（这是唯一通向本机操作的通道）。
-    if (isOwner && kind === 'private') {
-      const pcMatch = /^[\s\u3000]*(?:指令|\/pc|#)[\s\u3000]*([\s\S]*)$/.exec(plainContent.trim());
+    // 前缀和总开关都读 config.pcJobs —— 面板上能改的东西，底层必须真的认（2026-10-30 修：
+    // 以前这里硬编码「指令|/pc|#」，config.pcJobs.prefix / enabled 改了等于没改）。
+    if (isOwner && kind === 'private' && cfg.pcJobs?.enabled !== false) {
+      const pcPrefix = String(cfg.pcJobs?.prefix ?? '指令').trim() || '指令';
+      const pcRe = new RegExp(
+        `^[\\s\\u3000]*(?:${escapeRegExp(pcPrefix)}|\\/pc|#)[\\s\\u3000]*([\\s\\S]*)$`,
+      );
+      const pcMatch = pcRe.exec(plainContent.trim());
       if (pcMatch) {
         const rest = pcMatch[1].trim();
         // 「指令 空间 …」由桥接自己处理，不能落进本机干活会话（那里会把它当成"让 Agent 干活"）。

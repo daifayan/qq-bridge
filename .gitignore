@@ -53,7 +53,9 @@ models/
 /2026-09-30-工作总结.md
 /AstrBot-能力对比.md
 # 配置备份：含真实 accessToken / consoleToken
-/config.before-toggle.json
+# launcher/config-ops.mjs 的 writeConfig() 每次写配置都会生成一份
+# config.before-launcher.json，所以这里用通配符，别再漏掉新变体（2026-10-30）
+/config.before-*.json
 # 一键启动器：内嵌真实 BOTUIN + OneBot accessToken，
 # 可公开的脱敏模板见 启动全家桶.bat.example
 /启动全家桶.bat

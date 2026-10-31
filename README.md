@@ -131,6 +131,31 @@ node scripts/test-voice-e2e.mjs      # 复刻生产 maybeSendVoice 全链路，�
 
 > 想换声音/换引擎（如接外部 TTS 服务），改 `voice.engine` 与 `voice.local` / `voice.http` 段，详见 `config.example.json` 的 `voice` 模板。
 
+### 视频分镜（可选）
+
+QQ 视频以前只渲染成 `[视频]` 占位，模型看不见内容。开启后，桥接收到视频会产出**一张宫格图 + 一份带时间码的清单**，比逐帧抽图省 token，比只喂字幕看得多。
+
+- **依赖**：`dsh-video-storyboard` 插件 + `ffmpeg`/`ffprobe`（默认搜索 `~/.dsh/tools/ffmpeg/bin/`，不改系统 PATH）。
+- **开启**：`config.json` 的 `video.enabled = true`。
+- **参数**：`cells`（宫格数，`0` = 让插件按画面密度自己决定，也接受 4/6/9）、`maxBytes`（单视频下载上限，默认 40MB）、`timeoutMs`（单次分镜总时限）、`keepDays`（产物保留天数）、`maxTextChars`（清单进上下文的字数上限）。
+- **台词**：`video.transcript = "auto"` 时走本机离线 ASR（OpenAI 兼容转写接口，不联网不花钱）；`"off"` 只出画面。
+- **边界**：一条消息**只解析第一个视频**；超限或失败退化成一行说明文字，不静默吞掉。
+
+```bash
+node scripts/test-video-storyboard.mjs "某个视频.mp4"   # 配置 → CLI → ffmpeg → 实跑
+```
+
+> 详细说明与排错见 `docs/视频分镜-说明.md`。
+
+### QQ 指令（本机干活，可选）
+
+管理员私聊发「指令 …」，桥接把它交给一个**独立的 `standard` 会话在本机执行**，结果回私聊，并记到 `state/pc-jobs.jsonl`。
+
+- **开启**：`config.json` 的 `pcJobs.enabled = true`；`pcJobs.prefix` 是触发前缀（默认 `指令`，`/pc` 和 `#` 始终可用）。
+- **安全边界（桥接层卡死，不靠提示词）**：只认 `ownerQQ` + 只认私聊。群聊会话**永远**没有本机工具，群友说服 AI 也没用。
+- **工作目录**：`pcJobs.cwd`；会话用 `pcJobs.preset` 指定的 preset。
+- 改 `enabled` / `prefix` **立即生效**（每次判定现读配置），不用重启。
+
 ### DSH 端安装（必做：装 preset + 挂 MCP）
 
 桥接和控制台能跑起来还不够，DSH 端还需要安装两个聊天 preset（`qq-chat` / `qq-chat-v2`）并挂载 MCP。**单机新装同样必须执行这一步**（不是只有「另一台设备」才需要），装完还要**重启 DSH**：
@@ -205,6 +230,8 @@ npm start          # 或双击 start.bat（守护模式：崩溃自动重启，�
 - 桥接异常/消息无反应时：双击 `restart.bat`（自动杀旧实例 → 清理锁 → 重新启动守护）
 - **重启 DSH 通常不需要动桥接**：每 5 秒探活，DSH 不可用期间收到的 QQ 消息在桥接进程内排队（最多 50 条/会话，满后丢最旧项），恢复后尝试补投。桥接进程退出会丢失内存队列；断线期间已经结束的回复暂不保证补发。
 - 修改 `config.json` / `roles/` / `state/current-role.json` 后重启桥接生效；修改 `~/.dsh/.agent-presets/qq-chat*/` 或 MCP 配置后重启 DSH 生效
+- **QQ 必须先登录**：雪露是挂在已登录的 QQ 进程上的，QQ 没开时启动套件只会得到一串「3000 端口不通」。Windows 上 `启动桌面端套件.bat` 会先跑 `scripts/ensure-qq.mjs`，按 `paths.bat` 里的 `QQEXE` 自动把 QQ 拉起来（登录仍需人工扫码）；`QQEXE` 留空则跳过这一步
+- 语音和视频分镜的配置在桥接**启动时**快照进实例，改完要重启桥接；`pcJobs` 的开关和前缀是每次判定现读的，立即生效
 
 日志示例：
 
@@ -241,23 +268,34 @@ qq-bridge/
   docs/
     PROJECT_GUIDE.md    # 公开版项目说明书
   dsh/agent-presets/    # qq-chat / qq-chat-v2 的 DSH agent preset 模板
+  launcher/             # 「鲸鲸控制台」桌面启动器（127.0.0.1:3120，Edge --app 窗口）
+    server.mjs          # 本地服务：服务状态、动作执行、配置读写 HTTP 层
+    ui.html             # 界面：卡片式动作 + 模型/语音/视频/指令/白名单面板
+    config-ops.mjs      # 配置读写层：读 → 校验 → 备份 → 写 → 重启桥接
   plugins/qq-mode-console  # DSH 插件：注册 qq-mode 设置命名空间（仅 host 半，UI 卡片未实现）
+  public/console.html   # 桥接控制台网页（3100，可被 launcher 用 iframe 内嵌）
   src/
     bridge.js           # 主程序
     dsh-client.js       # Node 版 DSH API 客户端（WS 下行）
     md-to-plain.js      # Markdown → QQ 纯文本
+    tts.js / tts-text.js / voice-policy.js  # 本地 TTS、文本清洗、发声策略
+    video-storyboard.js # 视频分镜：落盘 → 调 CLI → 收宫格图 + 清单
     self-test.js        # DSH 侧自测
   scripts/              # 测试/运维脚本（含 postinstall 的 patch-snowluma-sdk.mjs）
     patch-snowluma-sdk.mjs  # 修补 SDK 的 ESM 打包 bug（postinstall 自动执行）
+    ensure-qq.mjs       # QQ 没开就拉起来（雪露只能挂到已登录的 QQ 上）
+    probe-console-dom.mjs   # 控制台面板 CDP 自检（SSE 下截图不可靠）
   state/                # 运行时数据（不入库）
 ```
 
 ## 已知限制
 
 - agent 回复在回合结束时一次性发送（不做流式逐字转发）；回复超过 4000 字自动分段
-- 图片及部分表情可以通过安全下载接入多模态模型；语音/视频以及无法取得图片字节的消息仍使用占位文本
+- 图片、语音、视频都可以接入多模态模型；无法取得字节的消息（如过期链接）仍使用占位文本
+- 视频分镜一条消息只解析第一个视频；离线 ASR 需要本机配好转写服务，没配好时台词退化为空
 - agent 的 Markdown 回复会转成纯文本（链接保留 `文字 (url)` 形式）
 - `@snowluma/sdk` 的 npm 发布版存在 ESM 扩展名 bug，本仓库通过 postinstall 补丁修复（见 `scripts/patch-snowluma-sdk.mjs`）
+- 桌面启动器（`launcher/`）的若干按钮会调用 `../tools/` 下的脚本，那部分不在本仓库内，换机器时需要一并搬过去
 
 ## 合规提醒与风险声明
 

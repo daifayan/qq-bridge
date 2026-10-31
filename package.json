@@ -25,6 +25,7 @@
     "test-console": "node scripts/test-console.mjs",
     "verify:adaptation": "node scripts/verify-dsh-015-adaptation.mjs",
     "test:api-adapt": "node scripts/test-api-adapt.mjs",
+    "test:video": "node scripts/test-video-storyboard.mjs",
     "verify:persona": "node scripts/verify-persona-config.mjs",
     "test:mcp-servers": "node scripts/test-mcp-servers-stdio.mjs",
     "test:plugin": "node scripts/test-qq-mode-plugin.mjs",
@@ -32,6 +33,7 @@
     "test:mux-reconnect": "node scripts/test-mux-reconnect.mjs",
     "probe:events": "node scripts/probe-events.mjs",
     "probe:tools": "node scripts/probe-tools.mjs",
+    "probe:console": "node scripts/probe-console-dom.mjs",
     "postinstall": "node scripts/patch-snowluma-sdk.mjs"
   },
   "dependencies": {

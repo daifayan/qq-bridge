@@ -30,3 +30,7 @@ set "DSHOPEN="
 set "SNOWDIR="
 set "BRIDGEDIR="
 set "LOGDIR="
+rem QQEXE: QQ client executable (e.g. D:\QQNT\QQ.exe). SnowLuma attaches to a
+rem running, logged-in QQ, so the suite start can bring QQ up by itself.
+rem Leave EMPTY to skip the auto-launch step.
+set "QQEXE="

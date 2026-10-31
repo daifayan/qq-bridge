@@ -163,7 +163,7 @@ function validateLimit(value, name) {
 
 // 使用已校验的 IP 发起请求，保留原始 Host/SNI，禁止重新解析 DNS。
 // 总时限包含 TCP/TLS、响应头和响应体；仅 socket idle timeout 无法阻止慢速滴流。
-function requestOnce(url, ip, limit, binary = false) {
+function requestOnce(url, ip, limit, binary = false, timeoutMs = REQUEST_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     let settled = false;
     let req;
@@ -180,7 +180,7 @@ function requestOnce(url, ip, limit, binary = false) {
       finish(error);
       req?.destroy(error);
       response?.destroy();
-    }, REQUEST_TIMEOUT_MS);
+    }, timeoutMs);
     const mod = url.protocol === 'https:' ? https : http;
     const hostname = url.hostname.replace(/^\[|\]$/g, '');
     try {
@@ -200,7 +200,7 @@ function requestOnce(url, ip, limit, binary = false) {
         },
         servername: url.protocol === 'https:' && !net.isIP(hostname) ? hostname : undefined,
         rejectUnauthorized: url.protocol === 'https:',
-        timeout: REQUEST_TIMEOUT_MS,
+        timeout: timeoutMs,
       }, (res) => {
         response = res;
         res.on('error', (error) => finish(error));
@@ -234,7 +234,7 @@ function requestOnce(url, ip, limit, binary = false) {
           if (!binary) { appendText(decoder.write(chunk)); return; }
           size += chunk.length;
           if (size > limit) {
-            finish(new Error(`图片超过大小限制（${limit} 字节）`));
+            finish(new Error(`内容超过大小限制（${limit} 字节）`));
             res.destroy();
             return;
           }
@@ -316,6 +316,34 @@ export async function safeFetchBuffer(urlString, maxBytes = 4 * 1024 * 1024) {
     if (!looksLikeImageBuffer(result.buffer)) {
       throw new Error(`抓取内容不是有效图片（PNG/JPEG/GIF/WebP）`);
     }
+    return { url: url.toString(), statusCode: result.statusCode, buffer: result.buffer };
+  }
+  throw new Error('重定向次数过多，已停止');
+}
+
+/**
+ * 抓取任意二进制（视频等）。与 safeFetchBuffer 的区别：
+ * - 不校验文件类型（视频不是图片）；
+ * - 超时可按内容大小放宽（视频动辄几十 MB，20 秒的默认总时限不够）。
+ * SSRF 防护、重定向逐跳校验、大小上限与 safeFetchBuffer 完全一致。
+ */
+export async function safeFetchBinary(urlString, maxBytes = 40 * 1024 * 1024, { timeoutMs = 90000 } = {}) {
+  validateLimit(maxBytes, 'maxBytes');
+  validateLimit(timeoutMs, 'timeoutMs');
+  const MAX_REDIRECTS = 5;
+  let { url, ip } = await validateFetchUrl(urlString);
+  for (let i = 0; i <= MAX_REDIRECTS; i++) {
+    const result = await requestOnce(url, ip, maxBytes, true, timeoutMs);
+    if ([301, 302, 303, 307, 308].includes(result.statusCode)) {
+      if (!result.redirect) throw new Error(`重定向缺少 Location: ${result.statusCode}`);
+      const next = new URL(result.redirect, url).toString();
+      ({ url, ip } = await validateFetchUrl(next));
+      continue;
+    }
+    if (result.statusCode < 200 || result.statusCode >= 300) {
+      throw new Error(`下载失败：HTTP ${result.statusCode}`);
+    }
+    if (!result.buffer || result.buffer.length === 0) throw new Error('下载内容为空');
     return { url: url.toString(), statusCode: result.statusCode, buffer: result.buffer };
   }
   throw new Error('重定向次数过多，已停止');

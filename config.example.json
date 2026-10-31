@@ -34,6 +34,7 @@
   "questionTimeoutMs": 300000,
   "consolePort": 3100,
   "consoleToken": "",
+  "consoleEmbedOrigins": ["http://127.0.0.1:3120", "http://localhost:3120"],
   "security": {
     "interceptNotify": true
   },
