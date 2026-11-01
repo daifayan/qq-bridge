@@ -5778,6 +5778,17 @@ async function main() {
     return s;
   }
 
+  // 判断文本里有没有会话令牌。判断逻辑必须留在这里（KNOWN_AGENT_TOKENS 是本文件的顶层常量），
+  // 跨模块只传这个函数，不传 Set —— 2026-11-01 就是 qq-send.js 直接引用了 Set 的名字，
+  // 每条消息都在 onebotSend 里抛 ReferenceError。
+  function hasKnownAgentToken(text) {
+    const s = String(text ?? '');
+    for (const token of KNOWN_AGENT_TOKENS) {
+      if (token && s.includes(token)) return true;
+    }
+    return false;
+  }
+
   function sendToQQ(key, msg) {
     const assertSendAllowed = captureSendGuard(key);
     const safeMsg = redactKnownTokensOnly(msg);
@@ -5801,7 +5812,7 @@ async function main() {
   const qqSend = createQQSend({
     cfg, log, ROOT, STATE_DIR, sendQueue, sendToQQ,
     appendActivity, escapeCqText, sessionPolicy, readRoleState, isSessionAllowedInCurrentMode,
-    redactKnownTokensOnly, getSocialV2State,
+    redactKnownTokensOnly, hasKnownAgentToken, getSocialV2State,
     getState: () => state,        // state 会被整体替换（切角色重置），必须现取
     getMode: () => currentMode,
     // 以下四者 + randInt 定义在 main 后半段，晚于本模块初始化 → 惰性取，避开 TDZ
@@ -9563,7 +9574,7 @@ ${req}
                   continue;
                 }
                 // 审计（对完整文本执行，避免截断漏判；这里只判断，不发送，避免双重发送）
-                const hasKnownToken = [...KNOWN_AGENT_TOKENS].some((t) => t && plain.includes(t));
+                const hasKnownToken = hasKnownAgentToken(plain);
                 if (shouldAuditKey(key) && (SENSITIVE_RE.test(plain) || hasKnownToken)) {
                   log(`⚠️ 回复被安全策略拦截 (${key})，疑似包含敏感信息${hasKnownToken ? '（含会话令牌）' : ''}`);
                   appendActivity(`${key} agent 回复被拦截（疑似敏感信息${hasKnownToken ? '/会话令牌' : ''}）`);
@@ -9866,10 +9877,15 @@ ${req}
   try {
     const probe = redactKnownTokensOnly('send-path-self-test');
     if (probe !== 'send-path-self-test') throw new Error(`脱敏函数返回值异常：${probe}`);
+    if (hasKnownAgentToken('send-path-self-test') !== false) throw new Error('令牌判断函数返回值异常');
     const missing = ['sendMessagesV2', 'sendBurstToQQ', 'sendVoiceRecord']
       .filter((name) => typeof qqSend?.[name] !== 'function');
     if (missing.length) throw new Error(`发送入口缺失：${missing.join(', ')}`);
-    log('发送链路自检：脱敏 + 发送入口正常');
+    // 模块内部的自检：覆盖 qq-send.js 里"只有真发消息才走到"的闸门
+    // （2026-11-01 第二次事故：该模块把 KNOWN_AGENT_TOKENS 当自由变量用，本文件的自检抓不到）
+    if (typeof qqSend?.selfTest !== 'function') throw new Error('qqSend.selfTest 缺失');
+    qqSend.selfTest();
+    log('发送链路自检：脱敏 + 令牌判断 + 发送入口正常');
   } catch (error) {
     log(`发送链路自检失败：${error?.message ?? error}（很可能又是某个常量被搬到了错误作用域，先查 grep -n "const 名字" 的缩进）`);
   }

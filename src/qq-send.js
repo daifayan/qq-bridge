@@ -13,7 +13,7 @@ import { sleep, withTimeout, SEND_TIMEOUT_MS } from './async-utils.js';
 const CTX_KEYS = [
   'cfg', 'log', 'ROOT', 'STATE_DIR', 'sendQueue', 'sendToQQ',
   'appendActivity', 'escapeCqText', 'randInt', 'sessionPolicy', 'readRoleState',
-  'isSessionAllowedInCurrentMode', 'redactKnownTokensOnly', 'getSocialV2State',
+  'isSessionAllowedInCurrentMode', 'redactKnownTokensOnly', 'hasKnownAgentToken', 'getSocialV2State',
   'getState', 'getMode',
   // 这四个在 bridge 里的定义晚于本模块初始化（TDZ），必须惰性取
   'getBot', 'getVideoStoryboard', 'getMessageMediaStore', 'getSocialV2',
@@ -27,7 +27,7 @@ export function createQQSend(ctx) {
   const {
     cfg, log, ROOT, STATE_DIR, sendQueue, sendToQQ,
     appendActivity, escapeCqText, randInt, sessionPolicy, readRoleState,
-    isSessionAllowedInCurrentMode, redactKnownTokensOnly, getSocialV2State,
+    isSessionAllowedInCurrentMode, redactKnownTokensOnly, hasKnownAgentToken, getSocialV2State,
     getState, getMode,
     getBot, getVideoStoryboard, getMessageMediaStore, getSocialV2,
   } = ctx;
@@ -196,7 +196,11 @@ export function createQQSend(ctx) {
       segments.push({ type: 'at', data: { qq: at } });
     }
     const rawMessage = String(message ?? '');
-    const hasKnownToken = [...KNOWN_AGENT_TOKENS].some((t) => t && rawMessage.includes(t));
+    // 2026-11-01：这里原来直接写 `[...KNOWN_AGENT_TOKENS]`，而那个 Set 属于 bridge ——
+    // 本模块既没 import 也没注入它，于是**每条消息**都在这里抛 ReferenceError，
+    // 日志表现为「QQ 发送失败 ... KNOWN_AGENT_TOKENS is not defined」。
+    // 现在统一走注入的判断函数（判断逻辑留在 bridge，模块只问"含不含令牌"）。
+    const hasKnownToken = hasKnownAgentToken(rawMessage);
     if (hasKnownToken) {
       log(`发送内容包含会话令牌，已阻止发送 (${kind}:${id})`);
       throw new Error('发送内容包含会话令牌，已阻止发送');
@@ -912,7 +916,7 @@ export function createQQSend(ctx) {
 
   // 统一出站消息：先完整文本审计，再发送。返回是否真的发出。
   async function auditAndSend(key, text) {
-    const hasKnownToken = [...KNOWN_AGENT_TOKENS].some((t) => t && String(text ?? '').includes(t));
+    const hasKnownToken = hasKnownAgentToken(text);
     if (shouldAuditKey(key) && (SENSITIVE_RE.test(text) || hasKnownToken)) {
       log(`⚠️ 回复被安全策略拦截 (${key})，疑似包含敏感信息${hasKnownToken ? '（含会话令牌）' : ''}`);
       appendActivity(`${key} agent 回复被拦截（疑似敏感信息${hasKnownToken ? '/会话令牌' : ''}）`);
@@ -938,6 +942,22 @@ export function createQQSend(ctx) {
   // ⚠️ reasoningEffort 直接决定花钱多少：思考链按"输出"计费（¥4/M 空闲、¥8/M 高峰），
   // 而缓存命中的输入只要 ¥0.02/M —— 输出是它的 200 倍。闲聊不需要深度推理，
   // 所以这里配 low；下面的 `|| 'max'` 兜底是"最贵档"，缺配置时请务必显式写清楚。
+  /**
+   * 发送链路自检：把"只有真发消息才会走到"的取值逻辑提前跑一遍，不真的发送。
+   *
+   * 2026-11-01 两次事故的教训：搬模块时最容易留下**自由变量**（既没 import 也没注入），
+   * 语法检查照过、桥接照常启动，只有执行到那一行才 ReferenceError。
+   * 这里覆盖发送前的两道闸门：令牌判断（onebotSend / auditAndSend）与脱敏。
+   */
+  function selfTest() {
+    if (typeof hasKnownAgentToken !== 'function') throw new Error('hasKnownAgentToken 未注入或不是函数');
+    if (typeof redactKnownTokensOnly !== 'function') throw new Error('redactKnownTokensOnly 未注入或不是函数');
+    const probe = 'send-path-self-test';
+    if (hasKnownAgentToken(probe) !== false) throw new Error('hasKnownAgentToken 对普通文本返回了 true');
+    if (redactKnownTokensOnly(probe) !== probe) throw new Error('redactKnownTokensOnly 改动了普通文本');
+    return true;
+  }
+
   // ── 对外暴露面：bridge 主流程 / 控制台 / social 层用到的发送能力 ──
   return {
     singleLineForQQ, splitLongSegment, planSocialTimeline, sendBurstToQQ, onebotSend,
@@ -947,5 +967,6 @@ export function createQQSend(ctx) {
     fetchOneBotImage, resolveMediaList, fetchMediaData, mediaHintFor, findMessageMedia,
     computeGapsV2, sendMessagesV2,
     shouldAuditKey, captureSendGuard, shouldBlockSilentReply, auditAndSend,
+    selfTest,
   };
 }
