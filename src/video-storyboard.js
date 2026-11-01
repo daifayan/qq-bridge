@@ -11,7 +11,7 @@
 //
 // 失败策略：一律抛错，由调用方降级成 `[视频（没能解析）]` 之类的文字占位，
 // 绝不静默假装看过。
-import fs from 'node:fs';
+import fs, { promises as fsp } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -113,7 +113,7 @@ export function createVideoStoryboard({ cfg = {}, log = () => {}, stateDir }) {
   async function run(source) {
     if (!conf.enabled) throw new Error('视频分镜未启用（config.video.enabled=false）');
     if (!bin) throw new Error('没找到 dsh-video-storyboard（先 dsh plugin --profile web add dsh-video-storyboard）');
-    fs.mkdirSync(outDir, { recursive: true });
+    await fsp.mkdir(outDir, { recursive: true });
 
     const base = safeBaseName(source.tag ?? source.url ?? source.filePath);
     let inputPath = source.filePath ? String(source.filePath) : '';
@@ -124,9 +124,15 @@ export function createVideoStoryboard({ cfg = {}, log = () => {}, stateDir }) {
         timeoutMs: Math.min(Number(conf.timeoutMs) || DEFAULTS.timeoutMs, 120_000)
       });
       inputPath = path.join(outDir, `${base}.mp4`);
-      fs.writeFileSync(inputPath, buffer);
-    } else if (!fs.existsSync(inputPath)) {
-      throw new Error(`视频文件不存在：${path.basename(inputPath)}`);
+      // 40MB 级视频的落盘不要同步卡住主线程。
+      await fsp.writeFile(inputPath, buffer);
+    } else {
+      try {
+        const stat = await fsp.stat(inputPath);
+        if (!stat.isFile()) throw new Error('not a regular file');
+      } catch {
+        throw new Error(`视频文件不存在：${path.basename(inputPath)}`);
+      }
     }
 
     const pngPath = path.join(outDir, `${base}.png`);
@@ -143,9 +149,12 @@ export function createVideoStoryboard({ cfg = {}, log = () => {}, stateDir }) {
     const lines = stdout.split('\n');
     const doneAt = lines.findIndex((line) => line.startsWith('[done]'));
     const text = (doneAt >= 0 ? lines.slice(doneAt + 1) : lines).join('\n').trim();
-    if (!fs.existsSync(pngPath)) throw new Error('分镜进程没有产出图片');
-
-    const pngBuffer = fs.readFileSync(pngPath);
+    let pngBuffer;
+    try {
+      pngBuffer = await fsp.readFile(pngPath);
+    } catch {
+      throw new Error('分镜进程没有产出图片');
+    }
     const maxChars = Number(conf.maxTextChars) || DEFAULTS.maxTextChars;
     const clipped = text.length > maxChars ? `${text.slice(0, maxChars)}\n…（清单已截断）` : text;
     log(`视频分镜完成：${path.basename(pngPath)} ${Math.round(pngBuffer.length / 1024)}KB / ${Date.now() - started}ms`);
