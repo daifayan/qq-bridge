@@ -20,6 +20,7 @@ import { createApiAdapter } from '../src/api-adapt.js';
 import { createTts } from '../src/tts.js';
 import { createVideoStoryboard } from '../src/video-storyboard.js';
 import { createQzone } from '../src/qzone.js';
+import { createStickerService } from '../src/sticker-v2.js';
 import { createQQSend } from '../src/qq-send.js';
 import { createConsoleVoice } from '../src/console-voice.js';
 import { createConsoleMisc } from '../src/console-misc.js';
@@ -95,6 +96,7 @@ export async function bridgeHarness({ config = {}, savedState, globals = {} } = 
     // 空间模块（2026-11-01 从 bridge.js 抽出）：依赖由 bridge 源码在 main 作用域里传入。
     createQzone,
     createQQSend, createConsoleVoice, createConsoleMisc, createConsoleSocialV2, createTokenUsage, sleep, withTimeout, SEND_TIMEOUT_MS,
+    createStickerService,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...globals,
   });
