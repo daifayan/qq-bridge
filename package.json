@@ -28,6 +28,7 @@
     "test:video": "node scripts/test-video-storyboard.mjs",
     "test:qzone": "node scripts/test-qzone-module.mjs",
     "test:qq-send": "node scripts/test-qq-send-module.mjs",
+    "test:console-misc": "node scripts/test-console-misc-module.mjs",
     "test:pc-hands": "node scripts/test-pc-hands.mjs",
     "test:camera": "node scripts/test-camera.mjs",
     "test:usage": "node scripts/test-token-usage.mjs",

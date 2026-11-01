@@ -22,6 +22,7 @@ import { createVideoStoryboard } from '../src/video-storyboard.js';
 import { createQzone } from '../src/qzone.js';
 import { createQQSend } from '../src/qq-send.js';
 import { createConsoleVoice } from '../src/console-voice.js';
+import { createConsoleMisc } from '../src/console-misc.js';
 import { createConsoleSocialV2 } from '../src/console-social-v2.js';
 import { createTokenUsage } from '../src/token-usage.js';
 import { inspectRoleCard, validateForSave, restoreRoleCard, sectionsOf } from '../src/role-card-guard.js';
@@ -93,7 +94,7 @@ export async function bridgeHarness({ config = {}, savedState, globals = {} } = 
     createVideoStoryboard,
     // 空间模块（2026-11-01 从 bridge.js 抽出）：依赖由 bridge 源码在 main 作用域里传入。
     createQzone,
-    createQQSend, createConsoleVoice, createConsoleSocialV2, createTokenUsage, sleep, withTimeout, SEND_TIMEOUT_MS,
+    createQQSend, createConsoleVoice, createConsoleMisc, createConsoleSocialV2, createTokenUsage, sleep, withTimeout, SEND_TIMEOUT_MS,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...globals,
   });
