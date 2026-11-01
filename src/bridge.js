@@ -9857,6 +9857,23 @@ ${req}
     log('角色卡体检失败: ' + (error?.message ?? error));
   }
 
+  // 发送链路自检（2026-11-01）：拆模块时最阴的故障是「某个 const 被区间替换带错缩进」，
+  // 从模块顶层掉进某个函数内部 —— 语法检查照过、桥接照常启动、控制台照常用，
+  // 只有真发消息那一刻才 ReferenceError。前一天踩过：KNOWN_AGENT_TOKENS 掉进
+  // startConsoleServer，日志里连续 4 条「QQ 发送失败 ... is not defined」，
+  // 而进程看起来完全健康。
+  // 这里在启动时就真调一次脱敏函数 + 确认发送入口都在，把这类问题提前到启动日志里。
+  try {
+    const probe = redactKnownTokensOnly('send-path-self-test');
+    if (probe !== 'send-path-self-test') throw new Error(`脱敏函数返回值异常：${probe}`);
+    const missing = ['sendMessagesV2', 'sendBurstToQQ', 'sendVoiceRecord']
+      .filter((name) => typeof qqSend?.[name] !== 'function');
+    if (missing.length) throw new Error(`发送入口缺失：${missing.join(', ')}`);
+    log('发送链路自检：脱敏 + 发送入口正常');
+  } catch (error) {
+    log(`发送链路自检失败：${error?.message ?? error}（很可能又是某个常量被搬到了错误作用域，先查 grep -n "const 名字" 的缩进）`);
+  }
+
   startDshWatch();
   startConsoleServer();
 
