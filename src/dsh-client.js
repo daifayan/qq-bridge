@@ -406,6 +406,10 @@ export class NodeApiClient extends AbstractApiClient {
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
     const socket = new WebSocket(url, { headers: { cookie: this.cookie } });
     const inbox = [];
+    // 用读游标代替 shift()：事件积压时 shift 每次都要搬移整个数组，越堵越慢。
+    let inboxHead = 0;
+    let inboxHighWater = 0;
+    let inboxWarnedAt = 0;
     let wake;
     let socketOpen = false;
     let eventStreamId = null;
@@ -416,6 +420,14 @@ export class NodeApiClient extends AbstractApiClient {
     const sessionToStream = new Map();
     const enqueue = (item) => {
       inbox.push(item);
+      const pending = inbox.length - inboxHead;
+      if (pending > inboxHighWater) inboxHighWater = pending;
+      const now = Date.now();
+      // 背压可观测：积压到 1000 帧才出声，最多 30 秒一次，避免把日志自己刷爆。
+      if (pending >= 1000 && now - inboxWarnedAt >= 30000) {
+        inboxWarnedAt = now;
+        console.error(`[dsh-client] remote.mux inbox backlog=${pending}（highWater=${inboxHighWater}）：消费端可能被发送/审批阻塞`);
+      }
       wake?.();
       wake = undefined;
     };
@@ -594,11 +606,16 @@ export class NodeApiClient extends AbstractApiClient {
     if (sig.aborted) handleAbort();
     try {
       while (true) {
-        while (inbox.length > 0) {
-          const item = inbox.shift();
+        while (inboxHead < inbox.length) {
+          const item = inbox[inboxHead];
+          inbox[inboxHead] = undefined;
+          inboxHead += 1;
           if (item.kind === 'end') return;
           yield item.envelope;
         }
+        // 队列已排空，回收数组空间并把游标归零。
+        inbox.length = 0;
+        inboxHead = 0;
         await new Promise((resolve) => { wake = resolve; });
       }
     } finally {

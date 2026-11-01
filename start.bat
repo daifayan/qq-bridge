@@ -52,5 +52,5 @@ if "%code%"=="2" (
 )
 
 echo [%date% %time%] bridge exited ^(code %code%^), restarting in 5 seconds...
-timeout /t 5 /nobreak >nul
+ping -n 6 127.0.0.1 >nul
 goto loop

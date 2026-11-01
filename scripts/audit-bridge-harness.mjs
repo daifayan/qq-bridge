@@ -14,10 +14,19 @@ import * as safeFetch from '../src/safe-fetch.js';
 import * as forward from '../src/forward.js';
 import * as slang from '../src/slang-learner.js';
 import * as sticker from '../src/sticker-lib.js';
+import { createBoundedLineWriter } from '../src/log-utils.js';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
 import { createApiAdapter } from '../src/api-adapt.js';
 import { createTts } from '../src/tts.js';
 import { createVideoStoryboard } from '../src/video-storyboard.js';
+import { createQzone } from '../src/qzone.js';
+import { createQQSend } from '../src/qq-send.js';
+import { createConsoleVoice } from '../src/console-voice.js';
+import { createConsoleSocialV2 } from '../src/console-social-v2.js';
+import { createTokenUsage } from '../src/token-usage.js';
+import { inspectRoleCard, validateForSave, restoreRoleCard, sectionsOf } from '../src/role-card-guard.js';
+import { checkLoop, resetLoopState, pruneLoopState } from '../src/loop-guard.js';
+import { sleep, withTimeout, SEND_TIMEOUT_MS } from '../src/async-utils.js';
 import { toSpeakable, hasSpeakableContent } from '../src/tts-text.js';
 import { decide, recordSpoken, createVoiceMemory } from '../src/voice-policy.js';
 
@@ -78,9 +87,13 @@ export async function bridgeHarness({ config = {}, savedState, globals = {} } = 
     SnowLumaWebSocketClient: FakeBot, text: (s) => s,
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector, createApiAdapter,
     createTts, toSpeakable, hasSpeakableContent, decide, recordSpoken, createVoiceMemory,
+    createBoundedLineWriter,
     // 视频分镜（9d1f757 加的调用）也得注入，否则 vm 里 ReferenceError。
     // 只构造不执行：createVideoStoryboard 构造期只解析 CLI 路径，不碰网络也不跑 ffmpeg。
     createVideoStoryboard,
+    // 空间模块（2026-11-01 从 bridge.js 抽出）：依赖由 bridge 源码在 main 作用域里传入。
+    createQzone,
+    createQQSend, createConsoleVoice, createConsoleSocialV2, createTokenUsage, sleep, withTimeout, SEND_TIMEOUT_MS,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...globals,
   });

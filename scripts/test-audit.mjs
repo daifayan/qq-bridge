@@ -9,7 +9,7 @@ const tests = [
   'test-audit-security.mjs', 'test-audit-security-mcp.mjs',
   'test-audit-setup.mjs', 'test-audit-setup-guards.mjs',
   'test-md-to-plain.mjs', 'test-slang-learn.mjs', 'test-mux-reconnect.mjs',
-  'test-secret-scan.mjs',
+  'test-performance.mjs', 'test-secret-scan.mjs',
 ];
 let failed = 0;
 for (const test of tests) {
