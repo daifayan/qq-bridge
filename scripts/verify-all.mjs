@@ -375,6 +375,7 @@ if (DEEP) {
     ['发送模块', 'test-qq-send-module.mjs', []],
     ['控制台零碎域', 'test-console-misc-module.mjs', []],
     ['表情服务', 'test-sticker-v2-module.mjs', []],
+    ['会话租约', 'test-session-lease-module.mjs', []],
     ['账本', 'test-token-usage.mjs', []],
     ['刷屏守卫', 'test-loop-guard.mjs', []],
     ['角色卡守卫', 'test-role-card-guard.mjs', []],
