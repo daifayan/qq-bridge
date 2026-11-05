@@ -32,6 +32,9 @@ function makeCtx(over = {}) {
     recordRecentAction: noop,
     recentActions: [],
     getStickerEntries: () => [],
+    // socialV2 必须注入：collectQzonePostMaterial 曾把它当自由变量，
+    // 导致「说说自动」上线后一直抛 ReferenceError（2026-11-05 修）
+    getSocialV2: () => ({ conversations: new Map() }),
     callSnowLuma: async (action) => { throw new Error('离线测试不发真实请求：' + action); },
     ...over,
   };
@@ -39,7 +42,7 @@ function makeCtx(over = {}) {
 }
 
 console.log('\n[1] 依赖注入缺项 → 必须立刻抛错（fail-closed，不要等到运行时 undefined）');
-for (const key of ['cfg', 'log', 'api', 'sendToQQ', 'callSnowLuma', 'getStickerEntries']) {
+for (const key of ['cfg', 'log', 'api', 'sendToQQ', 'callSnowLuma', 'getStickerEntries', 'getSocialV2']) {
   let threw = '';
   try { createQzone({ ...makeCtx(), [key]: undefined }); } catch (e) { threw = e.message; }
   must(`缺 ${key} 时抛错`, /ctx 缺少/.test(threw), threw);
@@ -104,6 +107,41 @@ console.log('\n[5] 端到端（离线）：说说列表 → 评论草稿 → 事
   const lines = await pending;
   must('端到端拿到草稿', String(lines?.[0] ?? '').includes('草稿'), String(lines?.[0] ?? '').slice(0, 40));
   must('草稿内容来自模型输出', String(lines?.[0] ?? '').includes('这是一句草稿'));
+}
+
+console.log('\n[回归] 说说素材收集必须走注入的 socialV2（曾因自由变量整段失效）');
+{
+  // 2026-11-05 真实事故：collectQzonePostMaterial 里直接写 socialV2.conversations，
+  // 而它是 bridge main 里的 const，模块拿不到 → 说说自动每次触发都 ReferenceError，
+  // 日志只有一行「说说自动：本轮异常 socialV2 is not defined」，功能等于全废。
+  const now = Date.now();
+  const conversations = new Map([
+    ['group:1', { recentMessages: [{ sender: '小明', text: '今晚一起打游戏吗', time: now - 3600 * 1000, isSelf: false }] }],
+    ['private:2', { recentMessages: [{ sender: '小红', text: '这个表情太好笑了', time: now - 7200 * 1000, isSelf: false }] }],
+  ]);
+  const q = createQzone(makeCtx({ getSocialV2: () => ({ conversations }) }));
+  let material = '';
+  let threw = '';
+  try { material = q.collectQzonePostMaterial(); } catch (e) { threw = e.message; }
+  must('不再抛 ReferenceError', !threw, threw);
+  must('取到了会话里的真人消息', material.includes('今晚一起打游戏吗') && material.includes('这个表情太好笑了'), String(material).slice(0, 60));
+  must('带上了会话 key 前缀', material.includes('[group:1]') && material.includes('[private:2]'));
+}
+{
+  // 自己发的不算素材（isSelf 要过滤掉）
+  const conversations = new Map([
+    ['group:1', { recentMessages: [{ sender: '我', text: '我自己说的话', time: Date.now(), isSelf: true }] }],
+  ]);
+  const q = createQzone(makeCtx({ getSocialV2: () => ({ conversations }) }));
+  must('自己发的消息不进素材', !String(q.collectQzonePostMaterial()).includes('我自己说的话'));
+}
+{
+  // 48 小时以外的旧消息不算素材
+  const conversations = new Map([
+    ['group:1', { recentMessages: [{ sender: '小明', text: '三天前的老话', time: Date.now() - 72 * 3600 * 1000, isSelf: false }] }],
+  ]);
+  const q = createQzone(makeCtx({ getSocialV2: () => ({ conversations }) }));
+  must('超过 48 小时的消息不进素材', !String(q.collectQzonePostMaterial()).includes('三天前的老话'));
 }
 
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');

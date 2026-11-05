@@ -7920,6 +7920,9 @@ ${req}
     readJsonSafe, atomicWriteJson, recordRecentAction, recentActions,
     getStickerEntries: sticker.getStickerEntries,   // 引用会整体换数组，必须现取
     callSnowLuma,
+    // socialV2 定义在本函数后半段（TDZ），必须惰性取。
+    // 之前 qzone 里直接引用它，是自由变量 → 「说说自动」每次触发都 ReferenceError。
+    getSocialV2: () => socialV2,
   });
   const {
     qzoneHelp, qzoneReply, handleQzone,
