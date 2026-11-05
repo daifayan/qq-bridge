@@ -12,6 +12,10 @@ const CTX_KEYS = [
   'currentRoleHint', 'ensureChatModel', 'sendToQQ', 'sleep',
   'readJsonSafe', 'atomicWriteJson', 'recordRecentAction', 'recentActions',
   'getStickerEntries', 'callSnowLuma',
+  // socialV2 是 bridge main 里的 const（晚于本模块初始化，TDZ）→ 惰性取。
+  // 2026-11-05 修：collectQzonePostMaterial 曾直接引用它，是自由变量，
+  // 导致「说说自动」每次触发都抛 ReferenceError、功能完全不可用。
+  'getSocialV2',
 ];
 
 /** ctx 里少一样就立刻炸掉，不要等到运行时报 undefined（fail-closed）。 */
@@ -23,7 +27,7 @@ export function createQzone(ctx) {
     cfg, log, api, STATE_DIR, ROOT,
     currentRoleHint, ensureChatModel, sendToQQ, sleep,
     readJsonSafe, atomicWriteJson, recordRecentAction, recentActions,
-    getStickerEntries, callSnowLuma,
+    getStickerEntries, callSnowLuma, getSocialV2,
   } = ctx;
 
   // ── QQ 空间：走 SnowLuma 内置的 QzoneApi（OneBot action）────────────────────
@@ -620,7 +624,7 @@ ${post}
   function collectQzonePostMaterial() {
     const now = Date.now();
     const bits = [];
-    for (const [key, st] of socialV2.conversations) {
+    for (const [key, st] of getSocialV2().conversations) {
       const msgs = (Array.isArray(st?.recentMessages) ? st.recentMessages : [])
         .filter((m) => m && !m.isSelf && now - Number(m.time || 0) < 48 * 3600 * 1000)
         .slice(-8)
@@ -1071,7 +1075,7 @@ ${stickerMenu ? `\n${stickerMenu}\n` : ''}
     qzoneHelp, qzoneReply, handleQzone, handleCommentFrame,
     qzoneAutoRound, qzoneAutoMode, qzoneAutoLimits, qzoneCommentMode,
     readQzonePostAuto, writeQzonePostAuto, loadQzonePostDrafts,
-    qzoneAuto,
+    qzoneAuto, collectQzonePostMaterial,
     QZONE_AUTO_MODES, QZONE_AUTO_FILE, QZONE_MODE_FILE, QZONE_UGC_RIGHTS,
   };
 }
