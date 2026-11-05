@@ -31,6 +31,7 @@
     "test:console-misc": "node scripts/test-console-misc-module.mjs",
     "test:sticker-v2": "node scripts/test-sticker-v2-module.mjs",
     "test:session-lease": "node scripts/test-session-lease-module.mjs",
+    "test:slang-service": "node scripts/test-slang-service-module.mjs",
     "test:pc-hands": "node scripts/test-pc-hands.mjs",
     "test:camera": "node scripts/test-camera.mjs",
     "test:usage": "node scripts/test-token-usage.mjs",
